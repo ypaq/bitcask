@@ -459,30 +459,19 @@ fold_keys_loop(Fd, Offset, Fun, Acc0) ->
     end.
 
 
-fold_hintfile(State, Fun, Acc) ->
+fold_hintfile(State, Fun, Acc0) ->
     HintFile = hintfile_name(State),
     case bitcask_io:file_open(HintFile, [readonly, read_ahead]) of
         {ok, HintFd} ->
             try
                 {ok, DataI} = file:read_file_info(State#filestate.filename),
                 DataSize = DataI#file_info.size,
-                {ok, HintI} = file:read_file_info(HintFile),
-                HintSize = HintI#file_info.size,
-                case bitcask_io:file_read(HintFd, ?HINT_RECORD_SZ) of
-                    {ok, <<H:?HINT_RECORD_SZ/bytes>>} ->
-                        fold_hintfile_loop(DataSize, HintSize, HintFile,
-                                           HintFd, H, Fun, Acc);
-                    {ok, Bytes} ->
-                        error_logger:error_msg("~s:fold_hintfile: ~s: expected "
-                                               "~p bytes but got only ~p "
-                                               "bytes, skipping\n",
-                                   [?MODULE, HintFile,
-                                    ?HINT_RECORD_SZ, size(Bytes)]),
-                        {error, {incomplete_hint, 1}};
-                    eof ->
-                        {error, empty_hintfile}; % should never be empty hintfiles
+                case fold_file_loop(HintFd, fun fold_hintfile_loop/6, Fun, Acc0, 
+                                    {DataSize, HintFile}) of 
                     {error, Reason} ->
-                        {error, {fold_hintfile, Reason}}
+                        {error, {fold_hintfile, Reason}};
+                    Acc ->
+                        Acc
                 end
             after
                 bitcask_io:file_close(HintFd)
@@ -492,47 +481,92 @@ fold_hintfile(State, Fun, Acc) ->
     end.
 
 
-fold_hintfile_loop(_, Rem, _, _,
-                   _, _, Acc) when Rem =:= 18 ->
-    Acc;
-fold_hintfile_loop(_, Rem, _, _,
-                   HintRecord, _, Acc) when Rem < 18 ->
-    case HintRecord of 
-        <<>> ->
-            %% Hint files without CRCs will end on a record boundary.
-            %% No way to know whether to expect a crc or not.
-            %% Over time, merges will add CRCs to all hint files and
-            %% we can set this as the default.
-            case application:get_env(bitcask, require_hint_crc) of
-                {ok, true} ->
-                    {error, {incomplete_hint, 4}};
-                _ ->
-                    Acc
-            end;
-        X ->
-            error_logger:error_msg("Bad hintfile data 1: ~p\n", [X]),
-            {error, {incomplete_hint, 2}}
-    end;
-fold_hintfile_loop(DataSize, Rem, HintFile, Fd,
-                   HintRecord, Fun, Acc0) ->
-    <<Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD,
-      TotalSz:?TOTALSIZEFIELD, Offset:?OFFSETFIELD>> = HintRecord,
-    ReadSz = KeySz + ?HINT_RECORD_SZ,
-    case bitcask_io:file_read(Fd, ReadSz) of
-        {ok, <<Key:KeySz/bytes, Rest/binary>>} when
-                                               Offset + TotalSz =< DataSize + 1 ->
+fold_hintfile_loop(<<0:?TSTAMPFIELD, 0:?KEYSIZEFIELD,
+                     _ExpectCRC:?TOTALSIZEFIELD, (?MAXOFFSET):?OFFSETFIELD>>,
+                   _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
+    {done, Acc, Consumed + ?HINT_RECORD_SZ};
+fold_hintfile_loop(<<Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD,
+                     TotalSz:?TOTALSIZEFIELD, Offset:?OFFSETFIELD,
+                     Key:KeySz/bytes, Rest/binary>>, 
+                   Fun, Acc0, Consumed0, {DataSize, HintFile} = Args,
+                   EOI) ->
+    %%error_logger:info_msg("regular match"),
+    case Offset + TotalSz =< DataSize + 1 of 
+        true ->
             PosInfo = {Offset, TotalSz},
             Acc = Fun(Key, Tstamp, PosInfo, Acc0),
-            fold_hintfile_loop(DataSize, Rem - ReadSz, 
-                               HintFile,  Fd, 
-                               Rest, Fun, Acc);
-        {ok, _} ->
+            Consumed = KeySz + ?HINT_RECORD_SZ + Consumed0,
+            %%error_logger:info_msg("recurse"),
+            fold_hintfile_loop(Rest, Fun, Acc, 
+                               Consumed, Args, EOI);
+        false ->
             error_logger:error_msg("Hintfile '~s' contains pointer ~p ~p "
                                    "that is greater than total data size ~p\n",
                                    [HintFile, Offset, TotalSz, DataSize]),
-            {error, {trunc_datafile, Acc0}};
+            {error, {trunc_datafile, Acc0}}
+    end;
+fold_hintfile_loop(<<>>, _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
+    case application:get_env(bitcask, require_hint_crc)  of
+        {ok, true} ->
+            {error, {incomplete_hint, 4}};
+        _ ->
+            {done, Acc, Consumed}
+    end;
+fold_hintfile_loop(_Bytes, _Fun, Acc0, Consumed0, _Args, _EOI) ->
+    %%error_logger:info_msg("leftover more"),
+    {more, Acc0, Consumed0}.
+
+
+fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args) ->
+    fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args, <<>>, ?CHUNK_SIZE).
+
+fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args, Prev, ChunkSz) ->
+    case bitcask_io:file_read(Fd, ChunkSz) of
+        {ok, <<Bytes0:ChunkSz/bytes>>} ->
+            Bytes = <<Prev/binary, Bytes0/binary>>,
+            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args, false) of
+                {more, Acc, Consumed} ->
+                    <<_:Consumed/bytes, Rest/binary>> = Bytes,
+%%                     error_logger:error_msg("more, consumed ~p len ~p",
+%%                                           [Consumed, byte_size(Rest)]),
+                    fold_file_loop(Fd, FoldFn, IntFoldFn, 
+                                   Acc, Args, Rest, ChunkSz);
+                {done, Acc, Consumed} ->
+                    case Consumed =:= byte_size(Bytes) of 
+                        true -> Acc;
+                        false -> 
+                            error_logger:error_msg("main, ~p ~p",
+                                                   [Consumed, byte_size(Bytes)]),
+                            {error, partial_fold}
+                    end
+            end;
+        {ok, <<Bytes0/binary>>} ->
+            Bytes = <<Prev/binary, Bytes0/binary>>,
+            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args, true) of
+                {more, _Acc, _Consumed} ->
+                    {error, fold_not_finished};
+                {done, Acc, Consumed} ->
+                    case Consumed =:= byte_size(Bytes) of 
+                        true -> Acc;
+                        false -> 
+                            error_logger:error_msg("part, ~p ~p",
+                                                   [Consumed, byte_size(Bytes)]),
+                            {error, partial_fold}
+                    end
+            end;
         eof ->
-            {error, incomplete_key};
+            case FoldFn(Prev, IntFoldFn, Acc0, 0, Args, true) of
+                {more, _Acc, _Consumed} ->
+                    {error, fold_not_finished};
+                {done, Acc, Consumed} ->
+                    case Consumed =:= byte_size(Prev) of 
+                        true -> Acc;
+                        false ->  
+                            error_logger:error_msg("eof, ~p ~p",
+                                                   [Consumed, byte_size(Prev)]),
+                            {error, partial_fold}
+                    end
+            end;
         {error, Reason} ->
             {error, Reason}
     end.

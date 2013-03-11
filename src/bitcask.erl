@@ -855,13 +855,15 @@ scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile, EnoentOK) ->
     %% Restrictive pattern matching below is intentional
     case bitcask_fileops:open_file(Filename) of
         {ok, File} ->
+            FileTstamp = bitcask_fileops:file_tstamp(File),
             F = fun(K, Tstamp, {Offset, TotalSz}, _) ->
                         bitcask_nifs:keydir_put(KeyDir,
                                                 K,
-                                                bitcask_fileops:file_tstamp(File),
+                                                FileTstamp,
                                                 TotalSz,
                                                 Offset,
-                                                Tstamp)
+                                                Tstamp,
+                                                false)
                 end,
             bitcask_fileops:fold_keys(File, F, undefined, recovery),
             if CloseFile == true ->
@@ -932,13 +934,13 @@ init_keydir_scan_key_files(_Dirname, _Keydir, 0) ->
     %% times, then we are just plain unlucky.  Or QuickCheck smites us
     %% from lofty Mt. Stochastic.
     {error, {init_keydir_scan_key_files, too_many_iterations}};
-init_keydir_scan_key_files(Dirname, KeyDir, Count) ->
-    try
+init_keydir_scan_key_files(Dirname, KeyDir, _Count) ->
+%    try
         SortedFiles = readable_files(Dirname),
-        _ = scan_key_files(SortedFiles, KeyDir, [], true, false)
-    catch _:_ ->
-            init_keydir_scan_key_files(Dirname, KeyDir, Count - 1)
-    end.
+        _ = scan_key_files(SortedFiles, KeyDir, [], true, false).
+%    catch _:_ ->
+%            init_keydir_scan_key_files(Dirname, KeyDir, Count - 1)
+%    end.
 
 get_filestate(FileId,
               State=#bc_state{ dirname = Dirname, read_files = ReadFiles }) ->

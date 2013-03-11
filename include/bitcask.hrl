@@ -39,4 +39,4 @@
 -define(MAXOFFSET, 16#ffffffffffffffff). % max 64-bit unsigned
 
 %% for hintfile validation
--define(CHUNK_SIZE, 1048576).
+-define(CHUNK_SIZE, 65535).
