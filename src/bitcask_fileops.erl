@@ -40,6 +40,8 @@
          file_tstamp/1,
          check_write/4]).
 
+-compile(export_all).
+
 -include_lib("kernel/include/file.hrl").
 
 -include("bitcask.hrl").
@@ -429,34 +431,36 @@ fold_loop(Fd, Filename, FTStamp, Header, Offset, Fun, Acc0, CrcSkipCount) ->
     end.
 
 fold_keys_loop(Fd, Offset, Fun, Acc0) ->
-    case bitcask_io:file_pread(Fd, Offset, ?HEADER_SIZE) of
-        {ok, Header} when erlang:size(Header) =:= ?HEADER_SIZE ->
-            <<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD,
-              ValueSz:?VALSIZEFIELD>> = Header,
-            TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
-            PosInfo = {Offset, TotalSz},
-            %% NOTE: We are intentionally *not* reading the value blob,
-            %%       so we cannot check the checksum.
-            case bitcask_io:file_pread(Fd, Offset + ?HEADER_SIZE, KeySz) of
-                {ok, Key} when erlang:size(Key) =:= KeySz ->
-                    Acc = Fun(Key, Tstamp, PosInfo, Acc0),
-                    fold_keys_loop(Fd, Offset + TotalSz, Fun, Acc);
-                eof ->
-                    Acc0;
-                {error, Reason} ->
-                    {error, Reason};
-                X ->
-                    error_logger:error_msg("Bad datafile entry 1: ~p\n", [X]),
-                    Acc0
-            end;
-        eof ->
-            Acc0;
+%%     case bitcask_io:file_position(Fd, Offset) of 
+%%         {ok, Offset} -> ok;
+    case bitcask_io:file_seekbof(Fd) of 
+        ok -> ok;
+        Other -> error(Other)
+    end,
+    
+    case fold_file_loop(Fd, fun fold_keys_int_loop/6, Fun, Acc0, Offset) of
         {error, Reason} ->
             {error, Reason};
-        X ->
-            error_logger:error_msg("Bad datafile entry 2: ~p\n", [X]),
-            Acc0
+        Acc -> Acc
     end.
+
+fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, 
+                     KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD, 
+                     Key:KeySz/bytes, _Vblob:ValueSz/bytes,
+                     Rest/binary>>, 
+                   Fun, Acc0, Consumed0, Offset, EOI) ->
+    TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
+    PosInfo = {Offset, TotalSz},
+    Consumed = Consumed0 + TotalSz,
+    Acc = Fun(Key, Tstamp, PosInfo, Acc0),
+    fold_keys_int_loop(Rest, Fun, Acc, Consumed, Offset + TotalSz, EOI);
+fold_keys_int_loop(<<>>, _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
+    {done, Acc, Consumed};
+fold_keys_int_loop(_Bytes, _Fun, Acc, Consumed, Args, EOI) when EOI =:= false ->
+    {more, Acc, Consumed, Args};
+fold_keys_int_loop(Bytes, _Fun, Acc, _Consumed, _Args, EOI) when EOI =:= true ->
+    error_logger:error_msg("Bad datafile entry 1: ~p\n", [Bytes]),
+    Acc.
 
 
 fold_hintfile(State, Fun, Acc0) ->
@@ -512,21 +516,21 @@ fold_hintfile_loop(<<>>, _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
         _ ->
             {done, Acc, Consumed}
     end;
-fold_hintfile_loop(_Bytes, _Fun, Acc0, Consumed0, _Args, _EOI) ->
+fold_hintfile_loop(_Bytes, _Fun, Acc0, Consumed0, Args, _EOI) ->
     %%error_logger:info_msg("leftover more"),
-    {more, Acc0, Consumed0}.
+    {more, Acc0, Consumed0, Args}.
 
 
 fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args) ->
     fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args, <<>>, ?CHUNK_SIZE).
 
-fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args, Prev, ChunkSz) ->
+fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev, ChunkSz) ->
     case bitcask_io:file_read(Fd, ChunkSz) of
         {ok, <<Bytes0/binary>>} ->
             Bytes = <<Prev/binary, Bytes0/binary>>,
-            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args, 
+            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args0, 
                         byte_size(Bytes0) /= ChunkSz) of
-                {more, Acc, Consumed} ->
+                {more, Acc, Consumed, Args} ->
                     <<_:Consumed/bytes, Rest/binary>> = Bytes,
                     fold_file_loop(Fd, FoldFn, IntFoldFn, 
                                    Acc, Args, Rest, ChunkSz);
