@@ -469,7 +469,7 @@ fold_hintfile(State, Fun, Acc0) ->
                 case fold_file_loop(HintFd, fun fold_hintfile_loop/6, Fun, Acc0, 
                                     {DataSize, HintFile}) of 
                     {error, Reason} ->
-                        {error, {fold_hintfile, Reason}};
+                        {error, Reason};
                     Acc ->
                         Acc
                 end
@@ -522,51 +522,25 @@ fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args) ->
 
 fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args, Prev, ChunkSz) ->
     case bitcask_io:file_read(Fd, ChunkSz) of
-        {ok, <<Bytes0:ChunkSz/bytes>>} ->
+        {ok, <<Bytes0/binary>>} ->
             Bytes = <<Prev/binary, Bytes0/binary>>,
-            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args, false) of
+            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args, 
+                        byte_size(Bytes0) /= ChunkSz) of
                 {more, Acc, Consumed} ->
                     <<_:Consumed/bytes, Rest/binary>> = Bytes,
-%%                     error_logger:error_msg("more, consumed ~p len ~p",
-%%                                           [Consumed, byte_size(Rest)]),
                     fold_file_loop(Fd, FoldFn, IntFoldFn, 
                                    Acc, Args, Rest, ChunkSz);
                 {done, Acc, Consumed} ->
                     case Consumed =:= byte_size(Bytes) of 
                         true -> Acc;
                         false -> 
-                            error_logger:error_msg("main, ~p ~p",
-                                                   [Consumed, byte_size(Bytes)]),
                             {error, partial_fold}
-                    end
-            end;
-        {ok, <<Bytes0/binary>>} ->
-            Bytes = <<Prev/binary, Bytes0/binary>>,
-            case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args, true) of
-                {more, _Acc, _Consumed} ->
-                    {error, fold_not_finished};
-                {done, Acc, Consumed} ->
-                    case Consumed =:= byte_size(Bytes) of 
-                        true -> Acc;
-                        false -> 
-                            error_logger:error_msg("part, ~p ~p",
-                                                   [Consumed, byte_size(Bytes)]),
-                            {error, partial_fold}
-                    end
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
             end;
         eof ->
-            case FoldFn(Prev, IntFoldFn, Acc0, 0, Args, true) of
-                {more, _Acc, _Consumed} ->
-                    {error, fold_not_finished};
-                {done, Acc, Consumed} ->
-                    case Consumed =:= byte_size(Prev) of 
-                        true -> Acc;
-                        false ->  
-                            error_logger:error_msg("eof, ~p ~p",
-                                                   [Consumed, byte_size(Prev)]),
-                            {error, partial_fold}
-                    end
-            end;
+            Acc0;
         {error, Reason} ->
             {error, Reason}
     end.
