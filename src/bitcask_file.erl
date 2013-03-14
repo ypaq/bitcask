@@ -109,11 +109,11 @@ handle_call({file_open, Owner, Filename, Opts}, _From, State) ->
     IsReadOnly = proplists:get_bool(readonly, Opts),
     Mode = case {IsReadOnly, IsCreate} of
                {true, _} ->
-                   [read, raw, binary, read_ahead];
+                   [read, raw, binary];
                {_, false} ->
-                   [read, write, raw, binary, read_ahead];
+                   [read, write, raw, binary];
                {_, true} ->
-                   [read, write, exclusive, raw, binary, read_ahead]
+                   [read, write, exclusive, raw, binary]
            end,
     [warn("Bitcask file option '~p' not supported~n", [Opt])
      || Opt <- [o_sync],

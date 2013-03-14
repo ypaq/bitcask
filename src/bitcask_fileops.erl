@@ -431,10 +431,8 @@ fold_loop(Fd, Filename, FTStamp, Header, Offset, Fun, Acc0, CrcSkipCount) ->
     end.
 
 fold_keys_loop(Fd, Offset, Fun, Acc0) ->
-%%     case bitcask_io:file_position(Fd, Offset) of 
-%%         {ok, Offset} -> ok;
-    case bitcask_io:file_seekbof(Fd) of 
-        ok -> ok;
+    case bitcask_io:file_position(Fd, Offset) of 
+        {ok, Offset} -> ok;
         Other -> error(Other)
     end,
     
@@ -446,14 +444,24 @@ fold_keys_loop(Fd, Offset, Fun, Acc0) ->
 
 fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, 
                      KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD, 
-                     Key:KeySz/bytes, _Vblob:ValueSz/bytes,
+                     Key:KeySz/bytes, 
                      Rest/binary>>, 
                    Fun, Acc0, Consumed0, Offset, EOI) ->
     TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
     PosInfo = {Offset, TotalSz},
     Consumed = Consumed0 + TotalSz,
     Acc = Fun(Key, Tstamp, PosInfo, Acc0),
-    fold_keys_int_loop(Rest, Fun, Acc, Consumed, Offset + TotalSz, EOI);
+%%     error_logger:info_msg("FKIL keysize ~p valsize ~p consumed ~p offset ~p rest ~p",
+%%                           [KeySz, ValueSz, Consumed, Offset, byte_size(Rest)]),
+    case byte_size(Rest) =< ValueSz of
+        false -> 
+            <<_:ValueSz/bytes, Next/binary>> = Rest,
+            fold_keys_int_loop(Next, Fun, Acc, Consumed, 
+                               Offset + TotalSz, EOI);
+        true ->
+            NewPos = Offset + TotalSz,
+            {skip, Acc, NewPos, NewPos}
+    end;
 fold_keys_int_loop(<<>>, _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
     {done, Acc, Consumed};
 fold_keys_int_loop(_Bytes, _Fun, Acc, Consumed, Args, EOI) when EOI =:= false ->
@@ -522,19 +530,54 @@ fold_hintfile_loop(_Bytes, _Fun, Acc0, Consumed0, Args, _EOI) ->
 
 
 fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args) ->
-    fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args, <<>>, ?CHUNK_SIZE).
+    fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args, none, ?CHUNK_SIZE).
 
-fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev, ChunkSz) ->
+fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev0, ChunkSz0) ->
+    {Prev, ChunkSz}
+        = case Prev0 of 
+              none -> {<<>>, ChunkSz0};
+              %if we're skipping around, we're likely too big
+              skip -> 
+                  CS = case ChunkSz0 >= 2048 of
+                           true -> ChunkSz0 div 2;
+                           false -> 1024
+                       end,
+                  %%error_logger:info_msg("shrink ~p -> ~p", [ChunkSz0, CS]),
+                  {<<>>, CS};
+              Other -> 
+                  CS = case byte_size(Other) of
+                           %% to avoid having to rescan the same 
+                           %% binaries over and over again.
+                           N when N > ChunkSz0 ->
+                               ChunkSz0 * 2;
+                           _ -> ChunkSz0
+                       end,
+                  %%error_logger:info_msg("grow ~p -> ~p", [ChunkSz0, CS]),
+                  {Other, CS}
+          end,
     case bitcask_io:file_read(Fd, ChunkSz) of
         {ok, <<Bytes0/binary>>} ->
             Bytes = <<Prev/binary, Bytes0/binary>>,
             case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args0, 
                         byte_size(Bytes0) /= ChunkSz) of
                 {more, Acc, Consumed, Args} ->
+                    %%error_logger:info_msg("more consumed ~p", [Consumed]),
                     <<_:Consumed/bytes, Rest/binary>> = Bytes,
                     fold_file_loop(Fd, FoldFn, IntFoldFn, 
                                    Acc, Args, Rest, ChunkSz);
+                {skip, Acc, Pos, Args} ->
+                    %%error_logger:info_msg("skip pos ~p", [Pos]),
+                    case bitcask_io:file_position(Fd, Pos) of
+                        {ok, Pos} ->
+                            fold_file_loop(Fd, FoldFn, IntFoldFn, 
+                                           Acc, Args, skip, ChunkSz);
+                        {error, Reason} ->
+                            {error, Reason};
+                        Other1 ->
+                            {error, {file_fold_error, Other1}}
+                    end;
                 {done, Acc, Consumed} ->
+                    %%error_logger:info_msg("done consumed ~p", [Consumed]),
                     case Consumed =:= byte_size(Bytes) of 
                         true -> Acc;
                         false -> 
