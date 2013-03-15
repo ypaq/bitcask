@@ -40,4 +40,6 @@
 
 %% for hintfile validation
 %%-define(CHUNK_SIZE, 65535).
+-define(MIN_CHUNK_SIZE, 1024).
 -define(CHUNK_SIZE, 1048576).
+-define(MAX_CHUNK_SIZE, 134217728).

@@ -38,15 +38,15 @@ test_cs(DataDir, BranchDir) ->
 
 time_folds(DataDir, SubDir) ->
     F1 = fun(_, _, _, A0) -> A0 + 1 end,
-    F2 = fun(_, _, _, _, A0) -> A0 + 1 end,
+    F2 = fun(_, _, A0) -> A0 + 1 end,
 
     clean_env(),
     %% this is basically a proxy for hintfile folds and 
     %% the CRC check
     {OpenTime, Ref} = timer:tc(bitcask, open, 
                                [DataDir++SubDir++"/"]),
-    bitcask:close(Ref),
-
+    %%bitcask:close(Ref),
+    
     clean_env(),
     {ok, Fd1} = 
         bitcask_io:file_open(DataDir++SubDir++"/1.bitcask.data", 
@@ -55,17 +55,12 @@ time_folds(DataDir, SubDir) ->
         timer:tc(bitcask_fileops, fold_keys_loop,
                  [Fd1, 0, F1, 0]),
     bitcask_io:file_close(Fd1),
-
+    
     clean_env(),
-    {ok, Fd2} = 
-        bitcask_io:file_open(DataDir++SubDir++"/1.bitcask.data", 
-                             [readonly]),
-    {ok, H} = bitcask_io:file_read(Fd2, 14),
     {FoldDatafileTime, Count2} =
-        %% fold_loop(Fd, Filename, FTStamp, H, 0, Fun, Acc, 0)
-        timer:tc(bitcask_fileops, fold_loop,
-                 [Fd2, DataDir++SubDir++"/1.bitcask.data", 
-                  "1", H, 0, F2, 0, 0]), 
+        timer:tc(bitcask, fold, [Ref, F2, 0]),
+    
+    
     io:format("Report for run: ~s~n", [SubDir]),
     io:format("Open:              ~15w~n", [OpenTime]),
     io:format("Datafile Key Fold: ~15w~10w~n", [FoldDatafileKeyTime, Count]),
