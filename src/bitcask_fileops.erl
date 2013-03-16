@@ -40,8 +40,6 @@
          file_tstamp/1,
          check_write/4]).
 
--compile(export_all).
-
 -include_lib("kernel/include/file.hrl").
 
 -include("bitcask.hrl").
@@ -408,7 +406,7 @@ fold_keys_loop(Fd, Offset, Fun, Acc0) ->
         Other -> error(Other)
     end,
     
-    case fold_file_loop(Fd, fun fold_keys_int_loop/6, Fun, Acc0, Offset) of
+    case fold_file_loop(Fd, fun fold_keys_int_loop/6, Fun, Acc0, {Offset, 0}) of
         {error, Reason} ->
             {error, Reason};
         Acc -> Acc
@@ -416,22 +414,35 @@ fold_keys_loop(Fd, Offset, Fun, Acc0) ->
 
 fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, 
                      KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD, 
-                     Key:KeySz/bytes, 
+                     Key:KeySz/bytes, _:ValueSz/bytes,
                      Rest/binary>>, 
-                   Fun, Acc0, Consumed0, Offset, EOI) ->
+                   Fun, Acc0, Consumed0, 
+                   {Offset, AvgValSz0}, 
+                   EOI) ->
     TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
     PosInfo = {Offset, TotalSz},
     Consumed = Consumed0 + TotalSz,
+    AvgValSz = (AvgValSz0 + ValueSz) div 2,
     Acc = Fun(Key, Tstamp, PosInfo, Acc0),
-    case byte_size(Rest) =< ValueSz of
-        false -> 
-            <<_:ValueSz/bytes, Next/binary>> = Rest,
-            fold_keys_int_loop(Next, Fun, Acc, Consumed, 
-                               Offset + TotalSz, EOI);
-        true ->
-            NewPos = Offset + TotalSz,
-            {skip, Acc, NewPos, NewPos}
-    end;
+    fold_keys_int_loop(Rest, Fun, Acc, Consumed, 
+                       {Offset + TotalSz, AvgValSz}, EOI);
+%% in the case where values are very large, we don't actually want to 
+%% get a larger binary if we don't have to, so just issue a skip.
+fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, 
+                     KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD, 
+                     Key:KeySz/bytes, 
+                     Rest/binary>>, 
+                   Fun, Acc0, Consumed0, 
+                   {Offset, AvgValSz0}, 
+                   _EOI) when AvgValSz0 > (?CHUNK_SIZE div 2) ->
+%%     error_logger:info_msg("skip: size ~p, valsize ~p consumed ~p", 
+%%                           [byte_size(Rest), ValueSz, Consumed0]),
+    TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
+    PosInfo = {Offset, TotalSz},
+    Acc = Fun(Key, Tstamp, PosInfo, Acc0),
+    AvgValSz = (AvgValSz0 + ValueSz) div 2,
+    NewPos = Offset + TotalSz,
+    {skip, Acc, NewPos, {NewPos, AvgValSz}};
 fold_keys_int_loop(<<>>, _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
     {done, Acc, Consumed};
 fold_keys_int_loop(_Bytes, _Fun, Acc, Consumed, Args, EOI) when EOI =:= false ->
@@ -462,11 +473,16 @@ fold_hintfile(State, Fun, Acc0) ->
             {error, {fold_hintfile, Reason}}
     end.
 
-
+%% conditional end match here, checking that we get the expected CRC-containing
+%% hint record, three-tuple done indicates that we've exhausted all bytes, or
+%% it's an error
 fold_hintfile_loop(<<0:?TSTAMPFIELD, 0:?KEYSIZEFIELD,
                      _ExpectCRC:?TOTALSIZEFIELD, (?MAXOFFSET):?OFFSETFIELD>>,
                    _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
     {done, Acc, Consumed + ?HINT_RECORD_SZ};
+%% main work loop here, containing the full match of hint record and key.
+%% if it gets a match, it proceeds to recurse over the rest of the big
+%% binary
 fold_hintfile_loop(<<Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD,
                      TotalSz:?TOTALSIZEFIELD, Offset:?OFFSETFIELD,
                      Key:KeySz/bytes, Rest/binary>>, 
@@ -485,25 +501,40 @@ fold_hintfile_loop(<<Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD,
                                    [HintFile, Offset, TotalSz, DataSize]),
             {error, {trunc_datafile, Acc0}}
     end;
-fold_hintfile_loop(<<>>, _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
+%% error case where we've gotten to the end of the file without the CRC match
+fold_hintfile_loop(<<>>, _Fun, Acc, _Consumed, _Args, EOI) when EOI =:= true ->
     case application:get_env(bitcask, require_hint_crc)  of
         {ok, true} ->
             {error, {incomplete_hint, 4}};
         _ ->
-            {done, Acc, Consumed}
+            {done, Acc}
     end;
+%% catchall case where we don't get enough bytes from fold_file_loop
 fold_hintfile_loop(_Bytes, _Fun, Acc0, Consumed0, Args, _EOI) ->
     {more, Acc0, Consumed0, Args}.
 
+
 %% @doc scaffolding for faster folds over large files.
 %% The somewhat tricky thing here is the FoldFn, which is a /6
-%% that does all the actual work
-
+%% that does all the actual work.  see fold_hintfile_loop as a 
+%% commented example
+-spec fold_file_loop(port(), 
+                     fun((binary(), fun(), any(), integer(),
+                          any(), true | false) -> 
+                                {more, any(), integer(), any()} |
+                                {done, any()} |
+                                {done, any(), integer()} |
+                                {skip, any(), integer(), any()} |
+                                {error, any()}),
+                     fun(), any(), any()) -> 
+                            {error, any()} | any().
 fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args) ->
     fold_file_loop(Fd, FoldFn, IntFoldFn, Acc, Args, none, ?CHUNK_SIZE).
 
 fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev0, ChunkSz0) ->
-    
+    %% analyze what happened in the last loop to determine whether or 
+    %% not to change the read size. This is an optimization for large values
+    %% in datafile folds and key folds
     {Prev, ChunkSz}
         = case Prev0 of 
               none -> {<<>>, ChunkSz0};
@@ -531,13 +562,24 @@ fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev0, ChunkSz0) ->
             Bytes = <<Prev/binary, Bytes0/binary>>,
             case FoldFn(Bytes, IntFoldFn, Acc0, 0, Args0, 
                         byte_size(Bytes0) /= ChunkSz) of
+                %% foldfuns should return more when they don't have enough
+                %% bytes to satisfy their main binary match.
                 {more, Acc, Consumed, Args} ->
-                    <<_:Consumed/bytes, Rest/binary>> = Bytes,
+                    Rest = 
+                        case Consumed > byte_size(Bytes) of
+                            true -> <<>>;
+                            false ->
+                                <<_:Consumed/bytes, R/binary>> = Bytes,
+                                R
+                        end,
                     fold_file_loop(Fd, FoldFn, IntFoldFn, 
                                    Acc, Args, Rest, ChunkSz);
-                {skip, Acc, Pos, Args} ->
-                    case bitcask_io:file_position(Fd, Pos) of
-                        {ok, Pos} ->
+                %% foldfuns should return skip when they have no need for 
+                %% the rest of the binary that they've been handed.
+                %% see fold_int_loosp for proper usage.
+                {skip, Acc, SkipTo, Args} ->
+                    case bitcask_io:file_position(Fd, SkipTo) of
+                        {ok, SkipTo} ->
                             fold_file_loop(Fd, FoldFn, IntFoldFn, 
                                            Acc, Args, skip, ChunkSz);
                         {error, Reason} ->
@@ -545,8 +587,14 @@ fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev0, ChunkSz0) ->
                         Other1 ->
                             {error, {file_fold_error, Other1}}
                     end;
+                %% the done two tuple is returned when we want to be 
+                %% unconditionally successfully finished, i.e. trailing data 
+                %% is a non-fatal error
                 {done, Acc} ->
                     Acc;
+                %% three tuple done requires full consumption of all bytes given
+                %% to the internal fold function, to satisfy the pre-existing 
+                %% semantics of hintfile folds.
                 {done, Acc, Consumed} ->
                     case Consumed =:= byte_size(Bytes) of 
                         true -> Acc;
