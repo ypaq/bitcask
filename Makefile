@@ -12,13 +12,16 @@ endif
 all: deps compile
 
 compile:
-	$(REBAR_BIN) compile eunit
+	$(REBAR_BIN) compile 
 
 deps:
 	$(REBAR_BIN) get-deps
 
-clean:
+clean: 
 	$(REBAR_BIN) clean
+
+eunit: deps compile
+	$(REBAR_BIN) skip_deps=true eunit
 
 # Release tarball creation
 # Generates a tarball that includes all the deps sources so no checkouts are necessary
