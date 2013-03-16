@@ -49,11 +49,10 @@ time_folds(DataDir, SubDir) ->
     
     clean_env(),
     {ok, Fd1} = 
-        bitcask_io:file_open(DataDir++SubDir++"/1.bitcask.data", 
-                             [readonly]),
+        bitcask_fileops:open_file(DataDir++SubDir++"/1.bitcask.data"),
     {FoldDatafileKeyTime, Count} =
-        timer:tc(bitcask_fileops, fold_keys_loop,
-                 [Fd1, 0, F1, 0]),
+        timer:tc(bitcask_fileops, fold_keys,
+                 [Fd1, F1, 0, datafile]),
     bitcask_io:file_close(Fd1),
     
     clean_env(),
