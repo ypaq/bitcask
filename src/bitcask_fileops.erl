@@ -434,7 +434,7 @@ fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD,
                      _Rest/binary>>, 
                    Fun, Acc0, _Consumed0, 
                    {Offset, AvgValSz0}, 
-                   _EOI) when AvgValSz0 > (?CHUNK_SIZE div 2) ->
+                   _EOI) when AvgValSz0 > ?CHUNK_SIZE ->
     TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
     PosInfo = {Offset, TotalSz},
     Acc = Fun(Key, Tstamp, PosInfo, Acc0),
