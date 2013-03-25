@@ -940,13 +940,13 @@ init_keydir_scan_key_files(_Dirname, _Keydir, 0) ->
     %% times, then we are just plain unlucky.  Or QuickCheck smites us
     %% from lofty Mt. Stochastic.
     {error, {init_keydir_scan_key_files, too_many_iterations}};
-init_keydir_scan_key_files(Dirname, KeyDir, _Count) ->
-%    try
+init_keydir_scan_key_files(Dirname, KeyDir, Count) ->
+    try
         SortedFiles = readable_files(Dirname),
-        _ = scan_key_files(SortedFiles, KeyDir, [], true, false).
-%    catch _:_ ->
-%            init_keydir_scan_key_files(Dirname, KeyDir, Count - 1)
-%    end.
+        _ = scan_key_files(SortedFiles, KeyDir, [], true, false)
+    catch _:_ ->
+            init_keydir_scan_key_files(Dirname, KeyDir, Count - 1)
+    end.
 
 get_filestate(FileId,
               State=#bc_state{ dirname = Dirname, read_files = ReadFiles }) ->
