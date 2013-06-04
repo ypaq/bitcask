@@ -230,6 +230,7 @@ get(Ref, Key, TryNum) ->
 %% @doc Store a key and value in a bitcase datastore.
 -spec put(reference(), Key::binary(), Value::binary()) -> ok.
 put(Ref, Key, Value) ->
+K = Key, if K == <<"key_to_delete">> -> io:format(user, "put: V ~p\n", [Value]); true -> ok end,
     #bc_state { write_file = WriteFile } = State = get_state(Ref),
 
     %% Make sure we have a file open to write
@@ -249,7 +250,13 @@ put(Ref, Key, Value) ->
 -spec delete(reference(), Key::binary()) -> ok.
 delete(Ref, Key) ->
     put(Ref, Key, ?TOMBSTONE),
-    ok = bitcask_nifs:keydir_remove((get_state(Ref))#bc_state.keydir, Key).
+    io:format(user, "\r\n\r\n\r\nHEYHEYHEYHEYHEY\r\n\r\n", []),
+    HRM, this is quite a thing.  So, we cannot call keydir_remove() here
+    and expect to avoid resurrection in all cases.  We need to keep the
+    tombstone in the keydir and remove it only during a *MERGE*.
+    That *MERGE* operation can only delete iff the tombstone...............
+    ok.
+    %% ok = bitcask_nifs:keydir_remove((get_state(Ref))#bc_state.keydir, Key).
 
 %% @doc Force any writes to sync to disk.
 -spec sync(reference()) -> ok.
@@ -1014,8 +1021,10 @@ io:format(user, "Merging ~p\n", [File]),
     FileId = bitcask_fileops:file_tstamp(File),
     F = fun(K, V, Tstamp, Pos, State0) ->
                 if Tstamp < State0#mstate.merge_start ->
+if K == <<"key_to_delete">> -> io:format(user, "fold: K ~p Tstamp ~p FileId ~p Offset ~p V ~p\n", [K, Tstamp, FileId, Pos, V]); true -> ok end,
                         merge_single_entry(K, V, Tstamp, FileId, Pos, State0);
                    true ->
+if K == <<"key_to_delete">> -> io:format(user, "fold: SKIP!!!! K ~p Tstamp ~p FileId ~p Offset ~p V ~p\n", [K, Tstamp, FileId, Pos, V]); true -> ok end,
                         State0
                 end
         end,
@@ -1034,17 +1043,20 @@ io:format(user, "Merging ~p\n", [File]),
     merge_files(State2#mstate { input_files = Rest }).
 
 merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
+if K == <<"key_to_delete">> -> io:format(user, "merge_single: K ~p Tstamp ~p FileId ~p Offset ~p V ~p\n", [K, Tstamp, FileId, Offset, V]); true -> ok end,
     case out_of_date(K, Tstamp, FileId, Pos, State#mstate.expiry_time, false,
                      [State#mstate.live_keydir, State#mstate.del_keydir]) of
         true ->
             %% NOTE: This remove is conditional on an exact match on
             %%       Tstamp + FileId + Offset
+if K == <<"key_to_delete">> -> io:format(user, "merge_single: ood\n", []); true -> ok end,
             bitcask_nifs:keydir_remove(State#mstate.live_keydir, K,
                                        Tstamp, FileId, Offset),
             State;
         false ->
             case (V =:= ?TOMBSTONE) of
                 true ->
+if K == <<"key_to_delete">> -> io:format(user, "merge_single: is tomb\n", []); true -> ok end,
                     ok = bitcask_nifs:keydir_put(State#mstate.del_keydir, K,
                                                  FileId, 0, Offset, Tstamp),
 
@@ -1062,6 +1074,7 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                         false -> State
                     end;
                 false ->
+if K == <<"key_to_delete">> -> io:format(user, "merge_single: is NOT tomb\n", []); true -> ok end,
                     ok = bitcask_nifs:keydir_remove(State#mstate.del_keydir, K),
                     inner_merge_write(K, V, Tstamp, FileId, Offset, State)
             end
@@ -1071,6 +1084,7 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                         #mstate{}) -> #mstate{}.
 
 inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
+if K == <<"key_to_delete">> -> io:format(user, "inner: K ~p Tstamp ~p OldFileId ~p OldOffset ~p V ~p\n", [K, Tstamp, OldFileId, OldOffset, V]); true -> ok end,
     %% write a single item while inside the merge process
 
     %% See if it's time to rotate to the next file
@@ -1078,6 +1092,7 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
         case bitcask_fileops:check_write(State#mstate.out_file,
                                          K, V, State#mstate.max_file_size) of
             wrap ->
+if K == <<"key_to_delete">> -> io:format(user, "inner: wrap\n", []); true -> ok end,
                 %% Close the current output file
                 ok = bitcask_fileops:sync(State#mstate.out_file),
                 ok = bitcask_fileops:close(State#mstate.out_file),
@@ -1092,6 +1107,7 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
                        NewFileName),
                 State#mstate { out_file = NewFile };
             ok ->
+if K == <<"key_to_delete">> -> io:format(user, "inner: NO wrap\n", []); true -> ok end,
                 State
         end,
     
@@ -1114,14 +1130,18 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
 out_of_date(_Key, _Tstamp, _FileId, _Pos, _ExpiryTime, EverFound, []) ->
     %% if we ever found it, and non of the entries were out of date,
     %% then it's not out of date
+K = _Key, if K == <<"key_to_delete">> -> io:format(user, "ood: 1st -> ~p\n", [EverFound == false]); true -> ok end,
     EverFound == false;
 out_of_date(_Key, Tstamp, _FileId, _Pos, ExpiryTime, _EverFound, _KeyDirs)
   when Tstamp < ExpiryTime ->
+K = _Key, if K == <<"key_to_delete">> -> io:format(user, "ood: 2nd -> true\n", []); true -> ok end,
     true;
 out_of_date(Key, Tstamp, FileId, {_,_,Offset,_} = Pos, ExpiryTime, EverFound,
             [KeyDir|Rest]) ->
+K = Key, if K == <<"key_to_delete">> -> io:format(user, "ood: 3rd @ Tstamp ~p FileId ~p Offset ~p EverFound ~p KeyDir ~p\n", [Tstamp, FileId, Offset, EverFound, KeyDir]); true -> ok end,
     case bitcask_nifs:keydir_get(KeyDir, Key) of
         not_found ->
+if K == <<"key_to_delete">> -> io:format(user, "ood: not_found\n", []); true -> ok end,
             out_of_date(Key, Tstamp, FileId, Pos, ExpiryTime, EverFound, Rest);
 
         E when is_record(E, bitcask_entry) ->
@@ -1134,13 +1154,16 @@ out_of_date(Key, Tstamp, FileId, {_,_,Offset,_} = Pos, ExpiryTime, EverFound,
                     %% file_id and the highest offset in that file.
                     if
                         E#bitcask_entry.file_id > FileId ->
+if K == <<"key_to_delete">> -> io:format(user, "ood: line ~p\n", [?LINE]); true -> ok end,
                             true;
 
                         E#bitcask_entry.file_id == FileId ->
                             case E#bitcask_entry.offset > Offset of
                                 true ->
+if K == <<"key_to_delete">> -> io:format(user, "ood: line ~p\n", [?LINE]); true -> ok end,
                                     true;
                                 false ->
+if K == <<"key_to_delete">> -> io:format(user, "ood: line ~p\n", [?LINE]); true -> ok end,
                                     out_of_date(
                                       Key, Tstamp, FileId, Pos, 
                                       ExpiryTime, true, Rest)
@@ -1161,16 +1184,19 @@ out_of_date(Key, Tstamp, FileId, {_,_,Offset,_} = Pos, ExpiryTime, EverFound,
                             %% Thus, we are NOT out of date. Check the
                             %% rest of the keydirs to ensure this
                             %% holds true.
+if K == <<"key_to_delete">> -> io:format(user, "ood: line ~p\n", [?LINE]); true -> ok end,
                             out_of_date(Key, Tstamp, FileId, Pos,
                                         ExpiryTime, true, Rest)
                     end;
 
                 E#bitcask_entry.tstamp < Tstamp ->
                     %% Not out of date -- check rest of the keydirs
+if K == <<"key_to_delete">> -> io:format(user, "ood: line ~p\n", [?LINE]); true -> ok end,
                     out_of_date(Key, Tstamp, FileId, Pos,
                                 ExpiryTime, true, Rest);
 
                 true ->
+if K == <<"key_to_delete">> -> io:format(user, "ood: line ~p\n", [?LINE]); true -> ok end,
                     %% Out of date!
                     true
             end
@@ -1230,8 +1256,10 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State, Retries, _LastErr)
                                  bitcask_fileops:file_tstamp(WriteFile2),
                                  Size, Offset, Tstamp, true) of
         ok ->
+K = Key, if K == <<"key_to_delete">> -> io:format(user, "do_put: ok @ Offset ~p\n", [Offset]); true -> ok end,
             {ok, State2#bc_state { write_file = WriteFile2 }};
         already_exists ->
+K = Key, if K == <<"key_to_delete">> -> io:format(user, "do_put: already_exists\n", []); true -> ok end,
             %% Assuming the timestamps in the keydir are
             %% valid, there is an edge case where the merge thread
             %% could have rewritten this Key to a file with a greater
@@ -1994,18 +2022,23 @@ resurrection_test_() ->
 
 resurrection() ->
     Dir = "/tmp/bc.resurrection",
+    KeyToDelete = <<"key_to_delete">>,
     io:format(user, "Deleting...\n", []),
     os:cmd("rm -rf " ++ Dir),
     io:format(user, "Writing...\n", []),
     Reference = bitcask:open(Dir, [read_write | opts()]),
-    bitcask:put(Reference, <<"key_to_delete">>, <<"tr0ll">>),
+    bitcask:put(Reference, KeyToDelete, <<"tr0ll">>),
     [ bitcask:put(Reference, term_to_binary(X), <<1:(8 * 1024 * 1)>>) || X <- lists:seq(1, 3000)],
     bitcask:put(Reference, <<"testtest">>, <<"testval">>),
-    REF = element(8, get(Reference)),
-    io:format(user, "testtest: ~p\n", [bitcask_nifs:keydir_get(REF, <<"testtest">>)]),
-    io:format(user, "key_to_delete: ~p\n", [bitcask_nifs:keydir_get(REF, <<"key_to_delete">>)]),
-    bitcask:delete(Reference, <<"key_to_delete">>),
-    io:format(user, "key_to_delete: ~p\n", [bitcask_nifs:keydir_get(REF, <<"key_to_delete">>)]),
+    %% REF = element(8, get(Reference)),
+    %% io:format(user, "testtest: ~p\n", [bitcask_nifs:keydir_get(REF, <<"testtest">>)]),
+    %% io:format(user, "key_to_delete: ~p\n", [bitcask_nifs:keydir_get(REF, KeyToDelete)]),
+
+    %% io:format(user, "\r\n\r\n\r\nHEYHEYHEYHEYHEY\r\n\r\n", []),
+    %% bitcask:put(Reference, KeyToDelete, ?TOMBSTONE),
+    bitcask:delete(Reference, KeyToDelete),
+
+    %% io:format(user, "key_to_delete: ~p\n", [bitcask_nifs:keydir_get(REF, KeyToDelete)]),
     [ bitcask:put(Reference, term_to_binary(X), <<1:(8 * 1024 * 1)>>) || X <- lists:seq(1, 3000)],
     timer:sleep(1000 + 1000),
     bitcask_merge_worker:merge(Dir, opts(), [Dir ++ "/2.bitcask.data"]),
@@ -2025,14 +2058,17 @@ io:format(user, "LINE ~p\n", [?LINE]),
 %% io:format(user, "LINE ~p REF = ~p\n", [?LINE, REF]),
 %%     io:format(user, "testtest: ~p\n", [bitcask_nifs:keydir_get(REF, <<"testtest">>)]),
 %% io:format(user, "LINE ~p\n", [?LINE]),
-%%     io:format(user, "key_to_delete: ~p\n", [bitcask_nifs:keydir_get(REF, <<"key_to_delete">>)]),
+%%     io:format(user, "key_to_delete: ~p\n", [bitcask_nifs:keydir_get(REF, KeyToDelete)]),
 %% io:format(user, "LINE ~p\n", [?LINE]),
-%%     io:format(user, "Read zombie: ~p\n", [bitcask:get(Reference2, <<"key_to_delete">>)]),
+%%     io:format(user, "Read zombie: ~p\n", [bitcask:get(Reference2, KeyToDelete)]),
 io:format(user, "LINE ~p\n", [?LINE]),
-    case bitcask:get(Reference2, <<"key_to_delete">>) of
-        {ok, _} ->
+    case bitcask:get(Reference2, KeyToDelete) of
+        {ok, ?TOMBSTONE} ->
+            io:format(user, "LINE ~p ... YO, got us a tombstone\n", [?LINE]),
+            tombstone;
+        {ok, V} ->
 io:format(user, "LINE ~p\n", [?LINE]),
-            exit(deleted_key_was_resurrected);
+            exit({deleted_key_was_resurrected, V});
         not_found ->
 io:format(user, "LINE ~p\n", [?LINE]),
             ok
