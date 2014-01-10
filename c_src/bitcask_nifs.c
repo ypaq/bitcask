@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "erl_nif.h"
 #include "erl_driver.h"
@@ -163,7 +164,7 @@ typedef struct
     ErlNifPid*    pending_awaken; // processes to wake once pending merged into entries
     unsigned int  pending_awaken_count;
     unsigned int  pending_awaken_size;
-    ErlNifMutex*  mutex;
+    pthread_rwlock_t* mutex;
     char          is_ready;
     char          name[0];
 } bitcask_keydir;
@@ -202,8 +203,9 @@ typedef struct
 
 
 // Handle lock helper functions
-#define LOCK(keydir)      { if (keydir->mutex) enif_mutex_lock(keydir->mutex); }
-#define UNLOCK(keydir)    { if (keydir->mutex) enif_mutex_unlock(keydir->mutex); }
+#define RD_LOCK(keydir)   { if (keydir->mutex) pthread_rwlock_rdlock(keydir->mutex); }
+#define WT_LOCK(keydir)   { if (keydir->mutex) pthread_rwlock_wrlock(keydir->mutex); }
+#define UNLOCK(keydir)    { if (keydir->mutex) pthread_rwlock_unlock(keydir->mutex); }
 
 // Related to tombstones in the pending hash.
 // Notice that tombstones in the entries hash are different.
@@ -387,7 +389,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
             keydir->fstats   = kh_init(fstats);
 
             // Be sure to initialize the mutex and set our refcount
-            keydir->mutex = enif_mutex_create(name);
+            keydir->mutex = malloc(sizeof(pthread_rwlock_t));
+            pthread_rwlock_init(keydir->mutex, NULL);
             keydir->refcount = 1;
 
             // Finally, register this new keydir in the globals
@@ -423,7 +426,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_mark_ready(ErlNifEnv* env, int argc, const ERL_
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
     {
         bitcask_keydir* keydir = handle->keydir;
-        LOCK(keydir);
+        WT_LOCK(keydir);
         keydir->is_ready = 1;
         UNLOCK(keydir);
         return ATOM_OK;
@@ -1076,7 +1079,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
         entry.key = (char*)key.data;
         entry.key_sz = key.size;
 
-        LOCK(keydir);
+        WT_LOCK(keydir);
 
         DEBUG("+++ Put key = %d file_id=%d offset=%d total_sz=%d tstamp=%u old_file_id=%d\r\n",
                (int)(key.data[3]),
@@ -1202,7 +1205,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
         enif_get_uint(env, argv[3], &rw_p))
     {
         bitcask_keydir* keydir = handle->keydir;
-        LOCK(keydir);
+        RD_LOCK(keydir);
 
         DEBUG("+++ Get issued\r\n");
 
@@ -1265,7 +1268,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_
     if (common_args_ok && other_args_ok)
     {
         bitcask_keydir* keydir = handle->keydir;
-        LOCK(keydir);
+        WT_LOCK(keydir);
 
         DEBUG("+++ Remove %s\r\n", is_conditional ? "conditional" : "");
         DEBUG_KEYDIR(keydir);
@@ -1371,7 +1374,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_copy(ErlNifEnv* env, int argc, const ERL_NIF_TE
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
     {
         bitcask_keydir* keydir = handle->keydir;
-        LOCK(keydir);
+        WT_LOCK(keydir);
 
         bitcask_keydir_handle* new_handle = enif_alloc_resource_compat(env,
                                                                        bitcask_keydir_RESOURCE,
@@ -1474,7 +1477,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
         int maxage;
         int maxputs;
 
-        LOCK(handle->keydir);
+        WT_LOCK(handle->keydir);
         DEBUG("+++ itr\r\n");
         bitcask_keydir* keydir = handle->keydir;
 
@@ -1547,7 +1550,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
             return enif_make_tuple2(env, ATOM_ERROR, ATOM_ITERATION_NOT_STARTED);
         }
 
-        LOCK(keydir);
+        RD_LOCK(keydir);
 
         while (handle->iterator != kh_end(keydir->entries))
         {
@@ -1613,7 +1616,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_release(ErlNifEnv* env, int argc, const ERL
 
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
     {
-        LOCK(handle->keydir);
+        WT_LOCK(handle->keydir);
         if (handle->iterating != 1)
         {
             // Iteration not started!
@@ -1652,7 +1655,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc, const ERL_NIF_TE
         {
             return enif_make_badarg(env);
         }
-        LOCK(keydir);
+        RD_LOCK(keydir);
 
         // Dump fstats info into a list of [{file_id, live_keys, total_keys,
         //                                   live_bytes, total_bytes,
@@ -1720,7 +1723,7 @@ ERL_NIF_TERM bitcask_nifs_increment_file_id(ErlNifEnv* env, int argc, const ERL_
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
     {
 
-        LOCK(handle->keydir);
+        WT_LOCK(handle->keydir);
         (handle->keydir->biggest_file_id)++;
         uint32_t id = handle->keydir->biggest_file_id;
         UNLOCK(handle->keydir);
@@ -1743,7 +1746,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_trim_fstats(ErlNifEnv* env, int argc, const ERL
     {
         bitcask_keydir* keydir = handle->keydir;
         
-        LOCK(keydir);
+        WT_LOCK(keydir);
         uint32_t file_id;
 
         list = argv[1];
@@ -2469,7 +2472,8 @@ static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
     {
         if (keydir->mutex)
         {
-            enif_mutex_destroy(keydir->mutex);
+            pthread_rwlock_destroy(keydir->mutex);
+            free(keydir->mutex);
         }
 
         free_keydir(keydir);
