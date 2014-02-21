@@ -605,6 +605,7 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
 
     %% Initialize the other keydirs we need.
     {ok, DelKeyDir} = bitcask_nifs:keydir_new(),
+    %%io:fwrite(standard_error, "merging w/ epoch ~p\n", [MergeEpoch]),
 
     %% Initialize our state for the merge
     State = #mstate { dirname = Dirname,
@@ -868,6 +869,7 @@ summary_info(Ref) ->
 %% ===================================================================
 
 summarize(Dirname, {FileId, LiveCount, TotalCount, LiveBytes, TotalBytes, OldestTstamp, NewestTstamp}) ->
+    %%io:fwrite(standard_error, "lc ~p tc ~p~n", [LiveCount, TotalCount]),
     #file_status { filename = bitcask_fileops:mk_filename(Dirname, FileId),
                    fragmented = trunc((1 - LiveCount/TotalCount) * 100),
                    dead_bytes = TotalBytes - LiveBytes,
@@ -1076,6 +1078,9 @@ merge_files(#mstate {  dirname = Dirname,
                     } = State) ->
     FileId = bitcask_fileops:file_tstamp(File),
     F = fun(K, V, Tstamp, Pos, State0) ->
+                %% io:fwrite(standard_error, 
+                %%           "merging value ~p ~p ~p ~p~n",
+                %%           [K, V, Tstamp, State0#mstate.merge_start]),
                 if Tstamp =< State0#mstate.merge_start ->
                         merge_single_entry(KT(K), V, Tstamp, FileId, Pos, State0);
                    true ->
@@ -1101,10 +1106,12 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
         true ->
             %% NOTE: This remove is conditional on an exact match on
             %%       Tstamp + FileId + Offset
+            %% io:fwrite(standard_error, "true\n", []),
             bitcask_nifs:keydir_remove(State#mstate.live_keydir, K,
                                        Tstamp, FileId, Offset),
             State;
         false ->
+            %% io:fwrite(standard_error, "false\n", []),
             case (V =:= ?TOMBSTONE) of
                 true ->
                     ok = bitcask_nifs:keydir_put(State#mstate.del_keydir, K,
@@ -1197,10 +1204,12 @@ out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
     case bitcask_nifs:keydir_get(KeyDir, Key, Mergeepoch, State#mstate.read_write_p) of
     %%case bitcask_nifs:keydir_get(KeyDir, Key, 16#ffffffffffffffff, State#mstate.read_write_p) of
         not_found ->
+            %% io:fwrite(standard_error, "not_found\n", []),
             out_of_date(State, Key, Tstamp, FileId, Pos, ExpiryTime,
                         Mergeepoch, EverFound, Rest);
 
         E when is_record(E, bitcask_entry) ->
+            %% io:fwrite(standard_error, "got ~p\n", [E]),
             if
                 E#bitcask_entry.tstamp == Tstamp ->
                     %% Exact match. In this situation, we use the file
@@ -1655,7 +1664,7 @@ fold_visits_frozen_test(RollOver) ->
         ok = bitcask_nifs:keydir_wait_pending(Ref),
         %% this is horrible, but there's some race here that keeps the
         %% files out of the fold, maybe?
-        timer:sleep(222),
+        timer:sleep(666),
         %% Check we see the updated fold
         L2 = fold(B, CollectAll, [], -1, -1),
         ?assertEqual([{<<"k2">>,<<"v2-2">>},
@@ -1727,7 +1736,7 @@ fold_visits_unfrozen_test(RollOver) ->
         ok = delete(B, <<"k">>),
         ok = put(B, <<"k2">>, <<"v2-2">>),
         ok = put(B, <<"k4">>, <<"v4">>),
-        timer:sleep(222),
+        timer:sleep(2000),
         CollectAll = fun(K, V, Acc) ->
                              [{K, V} | Acc]
                      end,
@@ -1780,20 +1789,23 @@ merge_test() ->
     %% only contain a single key.
     close(init_dataset("/tmp/bc.test.merge",
                        [{max_file_size, 1}], default_dataset())),
-    timer:sleep(2222),
-
+    os:cmd("sync"),
+    timer:sleep(900),
     %% Verify number of files in directory
     3 = length(readable_files("/tmp/bc.test.merge")),
 
     %% Merge everything
     ok = merge("/tmp/bc.test.merge"),
+    os:cmd("sync"),
+    timer:sleep(900),
     %% Verify we've now only got one file
     1 = length(readable_files("/tmp/bc.test.merge")),
 
     %% Make sure all the data is present
     B = bitcask:open("/tmp/bc.test.merge"),
     lists:foldl(fun({K, V}, _) ->
-                        {ok, V} = bitcask:get(B, K)
+                        R = bitcask:get(B, K),
+                        ?assertEqual({K, {ok, V}}, {K, R})
                 end, undefined, default_dataset()).
 
 
@@ -2152,6 +2164,8 @@ truncated_merge_test() ->
     DataSet = default_dataset() ++ [{<<"k98">>, <<"v98">>},
                                     {<<"k99">>, <<"v99">>}],
     close(init_dataset(Dir, [{max_file_size, 1}], DataSet)),
+    os:cmd("sync"),
+    timer:sleep(900),
 
     %% Verify number of files in directory
     5 = length(readable_files(Dir)),
@@ -2173,9 +2187,12 @@ truncated_merge_test() ->
     ok = corrupt_file(Data5, 15, <<"!">>),
     %% Merge everything
     ok = merge(Dir),
-    timer:sleep(222),
-    %% Verify we've now only got one file
     ok = bitcask_merge_delete:testonly__delete_trigger(),
+
+    os:cmd("sync"),
+    timer:sleep(900),
+
+    %% Verify we've now only got one file
     1 = length(readable_files(Dir)),
 
     %% Make sure all corrupted data is missing, all good data is present

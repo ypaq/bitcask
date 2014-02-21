@@ -36,6 +36,8 @@
 
 #include <stdio.h>
 
+typedef ErlNifUInt64 uint64;
+
 #ifdef BITCASK_DEBUG
 #include <stdarg.h>
 void DEBUG(const char *fmt, ...)
@@ -624,7 +626,7 @@ static int proxy_kd_entry_at_epoch(bitcask_keydir_entry* old,
 {
     if (!IS_ENTRY_LIST(old))
     {
-        if (epoch <= old->epoch)
+        if (epoch < old->epoch)
             return 0;
 
         //fprintf(stderr, "not entry list, epoch %llu\n", old->epoch);
@@ -727,11 +729,20 @@ static void find_keydir_entry(bitcask_keydir* keydir, ErlNifBinary* key,
     // If not in pending, check normal entries
     if (get_entries_hash(keydir->entries, key, &ret->itr, &ret->entries_entry))
     { 
-        //fprintf(stderr, "iteration lookup\n");
+        //int el = IS_ENTRY_LIST(ret->entries_entry);
+        //fprintf(stderr, "iteration lookup %d\n", el);
         ret->hash = keydir->entries;
-        ret->is_tombstone = 0; // is_tombstone(ret->entries_entry);
         ret->no_snapshot = !proxy_kd_entry_at_epoch(ret->entries_entry, epoch,
                                                     &ret->proxy);
+
+        if (ret->no_snapshot)
+        {
+            ret->is_tombstone = 1;
+        }
+        else
+        {
+            ret->is_tombstone = is_tombstone(ret->entries_entry);
+        }
         ret->found = 1;
         return;
     }
@@ -1222,7 +1233,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
 {
     bitcask_keydir_handle* handle;
     ErlNifBinary key;
-    uint64_t epoch;
+    uint64 epoch; //intentionally odd type to get around warnings
     uint32_t rw_p;
 
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle) &&
@@ -1278,7 +1289,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_epoch(ErlNifEnv* env, int argc, const ERL_N
     {
         LOCK(handle->keydir);
         //handle->keydir->epoch += 1; // make sure that our epoch is unique
-        uint64_t epoch = handle->keydir->epoch;
+        uint64 epoch = handle->keydir->epoch;
         UNLOCK(handle->keydir);
         //fprintf(stderr, "returning epoch %llu \n", epoch);
         return enif_make_uint64(env, epoch);
@@ -1526,7 +1537,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
 
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
     {
-        uint64_t ts;
+        uint64 epoch; //intentionally odd type to get around warnings
         int maxage;
         int maxputs;
 
@@ -1541,7 +1552,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
             return enif_make_tuple2(env, ATOM_ERROR, ATOM_ITERATION_IN_PROCESS);
         }
 
-        if (!(enif_get_uint64(env, argv[1], &ts) &&
+        if (!(enif_get_uint64(env, argv[1], &epoch) &&
               enif_get_int(env, argv[2], (int*)&maxage) &&
               enif_get_int(env, argv[3], (int*)&maxputs)))
         {
