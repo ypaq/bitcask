@@ -79,6 +79,7 @@
 -record(mstate, { dirname,
                   merge_lock,
                   merge_start,
+                  merge_epoch,
                   max_file_size,
                   input_files,
                   out_file,
@@ -360,7 +361,8 @@ fold(State, Fun, Acc0, MaxAge, MaxPut) ->
     KT = State#bc_state.key_transform,
     FrozenFun = 
         fun() ->
-                FoldTime = bitcask_time:tstamp(),
+                FoldEpoch = bitcask_nifs:keydir_get_epoch(State#bc_state.keydir),
+                %%io:fwrite(standard_error, "fold epoch ~p", [FoldEpoch]),
                 case open_fold_files(State#bc_state.dirname, 3) of
                     {ok, Files} ->
                         ExpiryTime = expiry_time(State#bc_state.opts),
@@ -372,7 +374,7 @@ fold(State, Fun, Acc0, MaxAge, MaxPut) ->
                                              false ->
                                                  case bitcask_nifs:keydir_get(
                                                         State#bc_state.keydir, K,
-                                                        FoldTime, State#bc_state.read_write_p) of
+                                                        FoldEpoch, State#bc_state.read_write_p) of
                                                      not_found ->
                                                          Acc;
                                                      E when is_record(E, bitcask_entry) ->
@@ -576,6 +578,7 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
     end,
 
     MergeStart = bitcask_time:tstamp(),
+    MergeEpoch = bitcask_nifs:keydir_get_epoch(LiveKeyDir),
     LiveRef = make_ref(),
     put_state(LiveRef, #bc_state{dirname = Dirname, keydir = LiveKeyDir}),
     {_KeyCount, Summary} = summary_info(LiveRef),
@@ -609,6 +612,7 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
                       max_file_size = get_opt(max_file_size, Opts),
                       input_files = InFiles,
                       merge_start = MergeStart,
+                      merge_epoch = MergeEpoch,
                       out_file = fresh,  % will be created when needed
                       merged_files = [],
                       partial = Partial,
@@ -1092,7 +1096,7 @@ merge_files(#mstate {  dirname = Dirname,
 
 merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
     case out_of_date(State, K, Tstamp, FileId, Pos, State#mstate.expiry_time,
-                     State#mstate.merge_start, false,
+                     State#mstate.merge_epoch, false,
                      [State#mstate.live_keydir, State#mstate.del_keydir]) of
         true ->
             %% NOTE: This remove is conditional on an exact match on
@@ -1180,20 +1184,21 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
 
 
 out_of_date(_State, _Key, _Tstamp, _FileId, _Pos, _ExpiryTime,
-            _MergeStart, EverFound, []) ->
+            _Mergeepoch, EverFound, []) ->
     %% if we ever found it, and none of the entries were out of date,
     %% then it's not out of date
     EverFound == false;
 out_of_date(_State, _Key, Tstamp, _FileId, _Pos, ExpiryTime,
-            _EverFound, _MergeStart, _KeyDirs)
+            _EverFound, _Mergeepoch, _KeyDirs)
   when Tstamp < ExpiryTime ->
     true;
 out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
-            ExpiryTime, MergeStart, EverFound, [KeyDir|Rest]) ->
-    case bitcask_nifs:keydir_get(KeyDir, Key, MergeStart, State#mstate.read_write_p) of
+            ExpiryTime, Mergeepoch, EverFound, [KeyDir|Rest]) ->
+    case bitcask_nifs:keydir_get(KeyDir, Key, Mergeepoch, State#mstate.read_write_p) of
+    %%case bitcask_nifs:keydir_get(KeyDir, Key, 16#ffffffffffffffff, State#mstate.read_write_p) of
         not_found ->
             out_of_date(State, Key, Tstamp, FileId, Pos, ExpiryTime,
-                        MergeStart, EverFound, Rest);
+                        Mergeepoch, EverFound, Rest);
 
         E when is_record(E, bitcask_entry) ->
             if
@@ -1214,7 +1219,7 @@ out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
                                 false ->
                                     out_of_date(
                                       State, Key, Tstamp, FileId, Pos,
-                                      ExpiryTime, MergeStart, true, Rest)
+                                      ExpiryTime, Mergeepoch, true, Rest)
                             end;
 
                         true ->
@@ -1233,13 +1238,13 @@ out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
                             %% rest of the keydirs to ensure this
                             %% holds true.
                             out_of_date(State, Key, Tstamp, FileId, Pos,
-                                        ExpiryTime, MergeStart, true, Rest)
+                                        ExpiryTime, Mergeepoch, true, Rest)
                     end;
 
                 E#bitcask_entry.tstamp < Tstamp ->
                     %% Not out of date -- check rest of the keydirs
                     out_of_date(State, Key, Tstamp, FileId, Pos,
-                                ExpiryTime, MergeStart, true, Rest);
+                                ExpiryTime, Mergeepoch, true, Rest);
 
                 true ->
                     %% Out of date!
@@ -1307,6 +1312,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                 ok ->
                     {ok, State2#bc_state { write_file = WriteFile2 }};
                 already_exists ->
+                    %%?debugFmt("got already exists~n", []),
                     %% Assuming the timestamps in the keydir are
                     %% valid, there is an edge case where the merge thread
                     %% could have rewritten this Key to a file with a greater
@@ -1600,7 +1606,7 @@ fold_visits_frozen_test(RollOver) ->
                             Me ! frozen,
                             receive
                                 done ->
-                                ok
+                                    ok
                             end
                     end,
         FreezeWaiter = proc_lib:spawn_link(
@@ -1646,9 +1652,10 @@ fold_visits_frozen_test(RollOver) ->
 
         %% Unfreeze the keydir, waiting until complete
         FreezeWaiter ! done,
-        bitcask_nifs:keydir_wait_pending(Ref),
-        timer:sleep(1100),
-
+        ok = bitcask_nifs:keydir_wait_pending(Ref),
+        %% this is horrible, but there's some race here that keeps the
+        %% files out of the fold, maybe?
+        timer:sleep(222),
         %% Check we see the updated fold
         L2 = fold(B, CollectAll, [], -1, -1),
         ?assertEqual([{<<"k2">>,<<"v2-2">>},
@@ -1673,7 +1680,8 @@ slow_worker() ->
                           end,
                           [{K, V} | Acc]
                   end,
-    B = bitcask:open("/tmp/bc.test.unfrozenfold"),
+    B = bitcask:open("/tmp/bc.test.unfrozenfold"), 
+    Owner ! ready,
     L = fold(B, SlowCollect, [], -1, -1), 
     case Values =:= lists:sort(L) of 
         true ->
@@ -1712,14 +1720,14 @@ fold_visits_unfrozen_test(RollOver) ->
             _ ->
                 ok
         end,
-        timer:sleep(1100),
-        
+        receive
+            ready -> ok
+        end,
         %% A delete, an update and an insert
         ok = delete(B, <<"k">>),
         ok = put(B, <<"k2">>, <<"v2-2">>),
         ok = put(B, <<"k4">>, <<"v4">>),
-     
-        timer:sleep(1100),
+        timer:sleep(222),
         CollectAll = fun(K, V, Acc) ->
                              [{K, V} | Acc]
                      end,
@@ -1772,14 +1780,13 @@ merge_test() ->
     %% only contain a single key.
     close(init_dataset("/tmp/bc.test.merge",
                        [{max_file_size, 1}], default_dataset())),
+    timer:sleep(2222),
 
     %% Verify number of files in directory
     3 = length(readable_files("/tmp/bc.test.merge")),
 
     %% Merge everything
-    timer:sleep(1100),
     ok = merge("/tmp/bc.test.merge"),
-
     %% Verify we've now only got one file
     1 = length(readable_files("/tmp/bc.test.merge")),
 
@@ -1860,7 +1867,6 @@ expire_merge_test() ->
     timer:sleep(2000),
 
     %% Merge everything
-    timer:sleep(1100),
     ok = merge("/tmp/bc.test.mergeexpire",[{expiry_secs,1}]),
 
     %% With lazy merge file creation there will be no files.
@@ -1927,7 +1933,6 @@ delete_merge_test() ->
     A1 = bitcask:list_keys(B1),
     close(B1),
 
-    timer:sleep(1100),
     ok = merge("/tmp/bc.test.delmerge",[]),
 
     %% Verify we've now only got one item left
@@ -1954,7 +1959,6 @@ delete_partial_merge_test() ->
 
     %% selective merge, hit all of the files with deletes but not
     %%  all of the ones with deleted data
-    timer:sleep(1100),
     ok = merge("/tmp/bc.test.pardel",[],{lists:reverse(lists:nthtail(2,
                                            lists:reverse(readable_files(
                                                "/tmp/bc.test.pardel")))),[]}),
@@ -2053,7 +2057,6 @@ expire_keydir_test() ->
 
     %% Merge everything
     ok = merge("/tmp/bc.test.mergeexpirekeydir",[{expiry_secs,1}]),
-    timer:sleep(1100),
 
     %% should be no keys in the keydir now
     0 = testhelper_keydir_count(KDB),
@@ -2169,10 +2172,8 @@ truncated_merge_test() ->
     ok = truncate_file(Hint4, 5),
     ok = corrupt_file(Data5, 15, <<"!">>),
     %% Merge everything
-    timer:sleep(1100),
     ok = merge(Dir),
-    timer:sleep(1100),
-
+    timer:sleep(222),
     %% Verify we've now only got one file
     ok = bitcask_merge_delete:testonly__delete_trigger(),
     1 = length(readable_files(Dir)),
@@ -2240,7 +2241,6 @@ leak_t1() ->
     [bitcask:delete(Ref, <<X:32>>) || X <- lists:seq(1, DelKeys)],
     io:format("After deleting ~p keys, lsof says: ~s", [DelKeys, Used()]),
 
-    timer:sleep(1100),
     bitcask:merge(Dir),
     io:format("After merging, lsof says: ~s", [Used()]),
 
@@ -2252,5 +2252,134 @@ leak_t1() ->
     io:format("Now, lsof says: ~s", [Used()]),
 
     ok.
+
+slow_folder(Cask) ->
+    Owner = receive
+                {owner, O} -> O
+            end,
+    SlowCollect = fun(K, V, Acc) ->
+                          if Acc == [] ->
+                                  Owner ! i_have_started_folding,
+                                  receive
+                                      go_ahead_with_fold ->
+                                          ok
+                                  end;
+                             true ->
+                                  ok
+                          end,
+                          receive
+                              go -> ok
+                          end,
+                          [{K, V} | Acc]
+                  end,
+    B = bitcask:open(Cask),
+    L = fold(B, SlowCollect, [], -1, -1),
+    Owner ! {slow_folder_done, self(), L},
+    bitcask:close(B).
+
+finish_worker_loop2(Pid) ->
+    receive
+        {slow_folder_done, Pid, L} ->
+            L
+    after 0 ->
+            Pid ! go,
+            finish_worker_loop2(Pid)
+    end.
+
+freeze_close_reopen_test_() ->
+    {timeout, 120, fun() -> freeze_close_reopen() end}.
+
+freeze_close_reopen() ->
+    Cask = "/tmp/bc.test.freeze_close_reopen_test" ++ os:getpid(),
+    %% khash.h has an __ac_prime_list[] entry at 11, and 70% of 11 is
+    %% approximately 8. So choose # of keys for Data to be a bit
+    %% below 8, and then # of keys for Data2 will definitely be
+    %% beyond the khash resizing point, e.g. 5x.
+    Keys = 7,
+    Data = [{<<K:32>>, <<K:32>>} || K <- lists:seq(1, Keys)],
+    DelKey = 2,
+    Data2 = [{<<K:32>>, <<(K+1):32>>} ||
+                K <- lists:seq(1, Keys*5),
+                K /= DelKey],
+    B = init_dataset(Cask, Data),
+    try
+        CollectAll = fun(K, V, Acc) -> [{K, V} | Acc] end,
+        PutData = fun(DataList) -> [begin ok = put(B, K, V) end ||
+                                       {K, V} <- DataList]
+                  end,
+
+        ?assertEqual(Data, lists:sort(fold(B, CollectAll, [], -1, -1))),
+        if true ->
+                State = get_state(B),
+                put_state(B, State#bc_state{max_file_size = 0})
+        end,
+
+        Pid = spawn(fun() -> slow_folder(Cask) end),
+        Pid ! {owner, self()},
+        receive
+            i_have_started_folding ->
+                ok
+        after 10*1000 ->
+                error(timeout_should_never_happen)
+        end,
+
+        %% The difference between the fold_visits_frozen_test test and
+        %% this test is that fold_visits_frozen_test will put
+        %% random-and-expired-and-thus-invisible keys into the keydir
+        %% to freeze it before it modifies any keys that are in the k*
+        %% range. This test modifies keys in the k* range
+        %% immediately.
+        PutData(Data2),
+        %% We must be able to check that both kinds of mutation are
+        %% tested .... delete a key also!
+        ok = delete(B, <<DelKey:32>>),
+        not_found = get(B, <<DelKey:32>>),
+
+        %% Sanity check
+        [{ok, V} = get(B, K) || {K, V} <- Data2],
+        not_found = get(B, <<DelKey:32>>),
+
+        ok = close(B),
+        B2 = open(Cask, [read_write]),
+        [{ok, V} = get(B2, K) || {K, V} <- Data2],
+        not_found = get(B2, <<DelKey:32>>),
+        %% It is too difficult here to figure out what fold would tell
+        %% us. The multi-folder stuff will allow additions to be made
+        %% as long as the khash doesn't resize.
+
+        %% Unfreeze the keydir, waiting until complete
+        Pid ! go_ahead_with_fold,
+        L1a = finish_worker_loop2(Pid),
+
+        %% Checking here is a bit crazy.
+        %% 1. The first item that the worker's fold found was *prior*
+        %% to our first mutation by PutData(). But the hash table
+        %% scrambles key order, so we have to cheat by assuming that
+        %% the last item in the folder's accumulator is the first
+        %% key visited by the fold.
+        %% 2. All of the other keys that were visited by the folder
+        %% should appear frozen, so we compare them to *Data*.
+        {FirstItemKey, _FirstItemValue} = FirstItemFound = lists:last(L1a),
+        [ExpectedFirstItemFound] = [KV || KV = {K, _} <- Data,
+                                          K == FirstItemKey],
+        ?assertEqual(ExpectedFirstItemFound, FirstItemFound),
+        ?assertEqual([KV || KV = {K, _} <- Data,
+                            K /= FirstItemKey],
+                     lists:sort(L1a) -- [FirstItemFound]),
+
+        %% Check that we see the updated data yet again
+        L3 = fold(B2, CollectAll, [], -1, -1),
+        ?assertEqual(Data2, lists:sort(L3)),
+        [{ok, V} = get(B2, K) || {K, V} <- Data2],
+        not_found = get(B2, <<DelKey:32>>),
+
+        bitcask:close(B2),
+        ok
+    after
+        bitcask_time:test__clear_fudge(),
+        catch bitcask:close(B),
+        os:cmd("rm -rf " ++ Cask)
+    end.
+
 
 -endif.
