@@ -232,7 +232,7 @@ prop_fold() ->
                      try
                          {Model, Fstats} = apply_kv_ops(Ops, Ref, [], #m_fstats{}),
                          check_fstats(Ref, Fstats),
-
+                         check_model(Ref, Model),
                          %% Build a list of the K/V pairs available to fold
                          Actual = case FoldOp of
                                       fold_keys ->

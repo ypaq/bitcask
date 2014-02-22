@@ -368,6 +368,8 @@ fold(State, Fun, Acc0, MaxAge, MaxPut) ->
                         ExpiryTime = expiry_time(State#bc_state.opts),
                         SubFun = fun(K0,V,TStamp,{_FN,FTS,Offset,_Sz},Acc) ->
                                          K = KT(K0),
+                                         %% io:fwrite(standard_error, "fold checking ~p ~p\n", 
+                                         %%           [K,V]),
                                          case (TStamp < ExpiryTime) of
                                              true ->
                                                  Acc;
@@ -1675,7 +1677,8 @@ fold_visits_frozen_test(RollOver) ->
     end.
 
 fold_visits_unfrozen_test_() ->
-    [?_test(fold_visits_unfrozen_test(false)),
+    [%%?_test(fold_visits_unfrozen_test(false)),
+     {timeout, 20, fun() -> fold_visits_unfrozen_test(false) end},
      ?_test(fold_visits_unfrozen_test(true))].
 
 slow_worker() ->
@@ -1716,6 +1719,7 @@ finish_worker_loop(Pid) ->
 fold_visits_unfrozen_test(RollOver) ->
     %%?debugFmt("rollover is ~p~n", [RollOver]),
     Cask = "/tmp/bc.test.unfrozenfold",
+
     B = init_dataset(Cask, default_dataset()),
     try
         Pid = spawn(fun slow_worker/0),
@@ -1730,13 +1734,15 @@ fold_visits_unfrozen_test(RollOver) ->
                 ok
         end,
         receive
-            ready -> ok
+            ready -> 
+                timer:sleep(40), % give the fold some time to start
+                ok
         end,
         %% A delete, an update and an insert
         ok = delete(B, <<"k">>),
         ok = put(B, <<"k2">>, <<"v2-2">>),
         ok = put(B, <<"k4">>, <<"v4">>),
-        timer:sleep(2000),
+        timer:sleep(100),
         CollectAll = fun(K, V, Acc) ->
                              [{K, V} | Acc]
                      end,

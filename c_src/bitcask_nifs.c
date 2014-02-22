@@ -737,11 +737,11 @@ static void find_keydir_entry(bitcask_keydir* keydir, ErlNifBinary* key,
 
         if (ret->no_snapshot)
         {
-            ret->is_tombstone = 1;
-        }
-        else
-        {
             ret->is_tombstone = is_tombstone(ret->entries_entry);
+        }
+        else //if there's a snapshot, we don't care if this is a tombstone 
+        {
+            ret->is_tombstone = 0;
         }
         ret->found = 1;
         return;
@@ -1002,6 +1002,7 @@ static void update_entry(bitcask_keydir* keydir,
             new_entry->file_id = upd_entry->file_id;
             new_entry->total_sz = upd_entry->total_sz;
             new_entry->offset = upd_entry->offset;
+            new_entry->epoch = upd_entry->epoch;
             new_entry->tstamp = upd_entry->tstamp;
             new_entry->key_sz = h->key_sz;
             memcpy(new_entry->key, h->key, h->key_sz);
