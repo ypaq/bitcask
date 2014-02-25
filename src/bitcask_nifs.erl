@@ -234,7 +234,7 @@ keydir_copy(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 keydir_itr(Ref, MaxAge, MaxPuts) ->
-    TS = keydir_get_epoch(Ref),
+    TS = bitcask_time:tstamp(),
     keydir_itr_int(Ref, TS, MaxAge, MaxPuts).
 
 keydir_itr_int(_Ref, _Ts, _MaxAge, _MaxPuts) ->

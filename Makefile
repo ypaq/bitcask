@@ -35,11 +35,9 @@ NOW	= $(shell date +%s)
 COUNTER = $(PWD)/$(NOW).current_counterexample.eqc
 EQCINFO = $(PWD)/$(NOW).eqc-info
 
-pulse_clean:
+pulse:
 	@rm -rf $(BASE_DIR)/.eunit
 	BITCASK_PULSE=1 $(REBAR_BIN) clean compile
-
-pulse:
 	env BITCASK_PULSE=1 $(REBAR_BIN) -D PULSE eunit skip_deps=true suites=$(PULSE_TESTS) ; \
 	if [ $$? -ne 0 ]; then \
 		echo PULSE test FAILED; \
