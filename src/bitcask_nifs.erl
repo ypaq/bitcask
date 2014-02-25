@@ -29,6 +29,7 @@
          keydir_put/8,
          keydir_get/3,
          keydir_get/4,
+         keydir_get_epoch/1,
          keydir_remove/2, keydir_remove/5,
          keydir_copy/1,
          keydir_fold/5,
@@ -199,7 +200,7 @@ keydir_put_int(_Ref, _Key, _FileId, _TotalSz, _Offset, _Tstamp, _NewestPutI,
     erlang:nif_error({error, not_loaded}).
 
 keydir_get(Ref, Key, ReadWriteP) ->
-    keydir_get(Ref, Key, 16#ffffffff, ReadWriteP).
+    keydir_get(Ref, Key, 16#ffffffffffffffff, ReadWriteP).
 
 keydir_get(Ref, Key, TStamp, ReadWriteP) when is_integer(ReadWriteP) ->
     case keydir_get_int(Ref, Key, TStamp, ReadWriteP) of
@@ -211,6 +212,9 @@ keydir_get(Ref, Key, TStamp, ReadWriteP) when is_integer(ReadWriteP) ->
     end.
 
 keydir_get_int(_Ref, _Key, _TStamp, _ReadWriteP) ->
+    erlang:nif_error({error, not_loaded}).
+
+keydir_get_epoch(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 keydir_remove(Ref, Key) ->
@@ -531,7 +535,6 @@ keydir_del_while_pending_test() ->
         %% Start keyfold iterator on Ref2
         ok = keydir_itr(Ref2, -1, -1),
         %% Delete Key
-        timer:sleep(1100),
         ?assertEqual(ok, keydir_remove(Ref1, Key)),
         ?assertEqual(not_found, keydir_get(Ref1, Key, 1)),
 
