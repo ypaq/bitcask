@@ -1114,7 +1114,9 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
             return ATOM_ALREADY_EXISTS;
         }
 
-        if (keydir->keyfolders != 0 &&
+        // If put would resize and iterating, start pending hash
+        if (kh_put_will_resize(entries, keydir->entries) &&
+            keydir->keyfolders != 0 &&
             (keydir->pending == NULL))
         {
             keydir->pending = kh_init(entries);
