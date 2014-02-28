@@ -629,6 +629,18 @@ check_trace(Trace, Cmds, Seed, NumFrozen) ->
                     erlang:display({advise, was_frozen, NumFrozen, fold_keys,
                                     cmds, Cmds, seed, Seed}),
                     [];
+              false when Pid /= FirstPid ->
+                    %% Exception because of model inadequacy
+                    %% TODO: Fix this.
+                    case get(advised) of
+                        undefined ->
+                            erlang:display({advise, fold_keys_by_forked_proc,
+                                            cmds, Cmds, seed, Seed}),
+                            put(advised, true);
+                        _ ->
+                            ok
+                    end,
+                    [];
               false ->
                     [{bad, Pid, {fold_keys, orddict:to_list(Vals), lists:sort(Keys)}}]
             end;
@@ -648,6 +660,18 @@ check_trace(Trace, Cmds, Seed, NumFrozen) ->
                     %% Exception because of model inadequacy (we hope)
                     erlang:display({advise, was_frozen, NumFrozen, fold,
                                     cmds, Cmds, seed, Seed}),
+                    [];
+              false when Pid /= FirstPid ->
+                    %% Exception because of model inadequacy
+                    %% TODO: Fix this.
+                    case get(advised) of
+                        undefined ->
+                            erlang:display({advise, fold_by_forked_proc,
+                                            cmds, Cmds, seed, Seed}),
+                            put(advised, true);
+                        _ ->
+                            ok
+                    end,
                     [];
               false ->
                     [{bad, Pid, {fold, orddict:to_list(Vals), lists:sort(KVs)}}]
