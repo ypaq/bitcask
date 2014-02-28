@@ -54,10 +54,12 @@
          file_read/2,
          file_write/2,
          file_position/2,
-         file_seekbof/1]).
+         file_seekbof/1,
+         file_truncate/1]).
 
 -on_load(init/0).
 
+-include_lib("kernel/include/file.hrl").
 -include("bitcask.hrl").
 
 -ifdef(PULSE).
@@ -421,6 +423,13 @@ file_seekbof(Ref) ->
 file_seekbof_int(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
+file_truncate(Ref) ->
+    bitcask_bump:big(),
+    file_truncate_int(Ref).
+
+file_truncate_int(_Ref) ->
+    erlang:nif_error({error, not_loaded}).
+
 
 %% ===================================================================
 %% Internal functions
@@ -755,6 +764,24 @@ keydir_wait_pending_test() ->
          after  1000 -> timeout_err
          end.
 
+file_truncate_test() ->
+    Path = "./tmp.file_truncate_test",
+    _ = file:delete(Path),
+    {ok, Ref} = file_open(Path, [create]),
+    try
+        Data = "Hello, world!\n",
+        ok = file_write(Ref, Data),
+        {ok, FI1} = file:read_file_info(Path),
+        Size = FI1#file_info.size,
+        Size = length(Data),
+        ok = file_truncate(Ref),
+        {ok, FI2} = file:read_file_info(Path),
+        0 = FI2#file_info.size,
+        ok
+    after
+        file_close(Ref),
+        _ = file:delete(Path)
+    end.
 
 -ifdef(EQC).
 

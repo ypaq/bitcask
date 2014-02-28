@@ -22,9 +22,17 @@
 -module(bitcask_io).
 -compile(export_all).
 
+-ifdef(PULSE).
+-compile({parse_transform, pulse_instrument}).
+-endif.
+
 file_open(Filename, Opts) ->
     M = file_module(),
     M:file_open(Filename, Opts).
+
+file_truncate(Ref) ->
+    M = file_module(),
+    M:file_truncate(Ref).
 
 file_close(Ref) ->
     M = file_module(),

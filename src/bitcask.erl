@@ -1176,10 +1176,18 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
     %% file. It's possible that this is a noop, as
     %% someone else may have written a newer value
     %% whilst we were processing.
-    _ = bitcask_nifs:keydir_put(State#mstate.live_keydir, K,
-                                bitcask_fileops:file_tstamp(Outfile),
-                                Size, Offset, Tstamp, OldFileId, OldOffset),
-    State1#mstate { out_file = Outfile }.
+    Outfile2 =
+      case bitcask_nifs:keydir_put(State#mstate.live_keydir, K,
+                                   bitcask_fileops:file_tstamp(Outfile),
+                                   Size, Offset, Tstamp, OldFileId,OldOffset) of
+          ok ->
+              Outfile;
+          already_exists ->
+              display_if_pulse({?MODULE,?LINE,un_write,merge_inner_write}),
+              {ok, O} = bitcask_fileops:un_write(Outfile),
+              O
+      end,
+    State1#mstate { out_file = Outfile2 }.
 
 
 out_of_date(_State, _Key, _Tstamp, _FileId, _Pos, _ExpiryTime,
@@ -1317,8 +1325,10 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     %% wrap to a new file with a greater file_id and rewrite
                     %% the key there.  Limit the number of recursions in case
                     %% there is a different issue with the keydir.
+                    display_if_pulse({?MODULE,?LINE,un_write,do_put}),
+                    {ok, WriteFile3} = bitcask_fileops:un_write(WriteFile2),
                     State3 = wrap_write_file(
-                               State2#bc_state { write_file = WriteFile2 }),
+                               State2#bc_state { write_file = WriteFile3 }),
                     do_put(Key, Value, State3, Retries - 1, 
                            already_exists, ValueType)
             end;
@@ -2387,4 +2397,12 @@ freeze_close_reopen() ->
     end.
 
 
+-endif.
+
+-ifdef(PULSE).
+display_if_pulse(T) ->
+    erlang:display(T).
+-else.
+display_if_pulse(_T) ->
+    ok.
 -endif.

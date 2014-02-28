@@ -283,6 +283,7 @@ ERL_NIF_TERM bitcask_nifs_file_read(ErlNifEnv* env, int argc, const ERL_NIF_TERM
 ERL_NIF_TERM bitcask_nifs_file_write(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_file_position(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_file_seekbof(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
+ERL_NIF_TERM bitcask_nifs_file_truncate(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 
 ERL_NIF_TERM errno_atom(ErlNifEnv* env, int error);
 ERL_NIF_TERM errno_error_tuple(ErlNifEnv* env, ERL_NIF_TERM key, int error);
@@ -329,7 +330,8 @@ static ErlNifFunc nif_funcs[] =
     {"file_read_int",   2, bitcask_nifs_file_read},
     {"file_write_int",  2, bitcask_nifs_file_write},
     {"file_position_int",  2, bitcask_nifs_file_position},
-    {"file_seekbof_int", 1, bitcask_nifs_file_seekbof}
+    {"file_seekbof_int", 1, bitcask_nifs_file_seekbof},
+    {"file_truncate_int", 1, bitcask_nifs_file_truncate}
 };
 
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
@@ -2294,6 +2296,22 @@ ERL_NIF_TERM bitcask_nifs_file_seekbof(ErlNifEnv* env, int argc, const ERL_NIF_T
     }
     else
     {
+        return enif_make_badarg(env);
+    }
+}
+
+ERL_NIF_TERM bitcask_nifs_file_truncate(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    bitcask_lock_handle* handle;
+
+    if (enif_get_resource(env, argv[0], bitcask_file_RESOURCE, (void**)&handle))
+    {
+        if (ftruncate(handle->fd, 0) == -1)
+        {
+            return errno_error_tuple(env, ATOM_FTRUNCATE_ERROR, errno);
+        }
+        return ATOM_OK;
+    } else {
         return enif_make_badarg(env);
     }
 }
