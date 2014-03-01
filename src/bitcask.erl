@@ -255,11 +255,7 @@ get(Ref, Key, TryNum) ->
     end.
 
 %% @doc Store a key and value in a bitcase datastore.
--spec put(reference(), Key::binary(), Value::binary()) -> ok.
 put(Ref, Key, Value) ->
-    put(Ref, Key, Value, key).
-
-put(Ref, Key, Value, ValueType) ->
     #bc_state { write_file = WriteFile } = State = get_state(Ref),
 
     %% Make sure we have a file open to write
@@ -272,56 +268,14 @@ put(Ref, Key, Value, ValueType) ->
     end,
 
     {Ret, State1} = do_put(Key, Value, State, 
-                           ?DIABOLIC_BIG_INT, undefined,
-                           ValueType),
+                           ?DIABOLIC_BIG_INT, undefined),
     put_state(Ref, State1),
     Ret.
 
 %% @doc Delete a key from a bitcask datastore.
 -spec delete(reference(), Key::binary()) -> ok.
 delete(Ref, Key) ->
-    State = get_state(Ref),
-    %% Imagine this order of sequential operations by a single process:
-    %%    1. Open for read/write
-    %%    2. Open an iterator
-    %%    3. Put key K
-    %%    4. Delete key K
-    %%    5. Close iterator
-    %%    6. Get K -> not_found.
-    %% If we use a regular keydir_get() below, then we won't see the
-    %% mutation at step #3, so we don't delete anything.
-    %% If there is an iteration underway, we need to be able to
-    %% see the very latest mutations to the keydir to be able to
-    %% support the following operation.
-    case bitcask_nifs:keydir_get_always_latest(State#bc_state.keydir, Key, State#bc_state.read_write_p) of
-        not_found ->
-            ok;
-        E when is_record(E, bitcask_entry) ->
-            #bitcask_entry{tstamp=TStamp, file_id=FileId, offset=Offset} = E,
-            case TStamp < expiry_time(State#bc_state.opts) of
-                true ->
-                    %% Expired entry
-                    ok;
-                false ->
-                    %% To avoid races with merge activity, we must put
-                    %% the tombstone first.  If there is a race with
-                    %% a merge, do_put() will be told to wrap and open
-                    %% an new data file to retry to the tombstone put;
-                    %% in that case, this tombstone will be retried &
-                    %% rewritten to a fileid > merge's fileid.
-                    Tombstone = <<?TOMBSTONE2_STR, FileId:32, Offset:64>>,
-                    put(Ref, Key, Tombstone, tombstone),
-                    case bitcask_nifs:keydir_remove((get_state(Ref))#bc_state.keydir, Key,
-                                                    TStamp, FileId, Offset) of
-                        ok ->
-                            ok;
-                        already_exists ->
-                            delete(Ref, Key)
-                    end
-            end
-    end,
-    ok.
-
+    put(Ref, Key, tombstone).
 
 %% @doc Force any writes to sync to disk.
 -spec sync(reference()) -> ok.
@@ -367,8 +321,8 @@ fold_keys(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
             true ->
                 Acc;
             false ->
-                TSize1 = size(?TOMBSTONE),
-                TSize2 = size(?TOMBSTONE2) + 4 + 8,
+                TSize1 = ?TOMBSTONE_V1_SIZE,
+                TSize2 = ?TOMBSTONE_V2_SIZE,
                 case BCEntry#bitcask_entry.total_sz -
                             (?HEADER_SIZE + size(Key)) of
                     Ss when Ss == TSize1; Ss == TSize2 ->
@@ -956,9 +910,9 @@ to_lower_grace_time_bound(X) ->
 
 expiry_grace_time(Opts) -> to_lower_grace_time_bound(get_opt(expiry_grace_time, Opts)).
 
-is_tombstone(?TOMBSTONE) ->
+is_tombstone(?TOMBSTONE_V1) ->
     true;
-is_tombstone(<<?TOMBSTONE2_STR, _FileId:32, _Offset:64>>) ->
+is_tombstone(<<?TOMBSTONE_V2_STR, _FileId:32, _Offset:64>>) ->
     true;
 is_tombstone(_) ->
     false.
@@ -1186,7 +1140,7 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                      [State#mstate.live_keydir, State#mstate.del_keydir]) of
         true ->
             State2 = case V of
-                <<?TOMBSTONE2_STR, DeadFileId:32, _DeadOffset:64>> ->
+                <<?TOMBSTONE_V2_STR, DeadFileId:32, _DeadOffset:64>> ->
                     case sets:is_element(DeadFileId, State#mstate.after_fileids) of
                         true ->
                             inner_merge_write(K, V, Tstamp, FileId, Offset,
@@ -1386,10 +1340,10 @@ readable_files(Dirname) ->
 
 %% Internal put - have validated that the file is opened for write
 %% and looked up the state at this point
-do_put(_Key, _Value, State, 0, LastErr, _ValueType) ->
+do_put(_Key, _Value, State, 0, LastErr) ->
     {{error, LastErr}, State};
 do_put(Key, Value, #bc_state{write_file = WriteFile} = State, 
-       Retries, _LastErr, ValueType) ->
+       Retries, _LastErr) ->
     case bitcask_fileops:check_write(WriteFile, Key, Value,
                                      State#bc_state.max_file_size) of
         wrap ->
@@ -1421,14 +1375,11 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
     end,
 
     Tstamp = bitcask_time:tstamp(),
-    ValueIsTombstone = if ValueType == key       -> false;
-                          ValueType == tombstone -> true
-                       end,
-    {ok, WriteFile2, Offset, Size} = bitcask_fileops:write(
-                                       State2#bc_state.write_file,
-                                       Key, Value, Tstamp, ValueIsTombstone),
-    case ValueType of
-        key ->
+    case Value of
+        BinValue when is_binary(BinValue) ->
+            {ok, WriteFile2, Offset, Size} = bitcask_fileops:write(
+                                               State2#bc_state.write_file,
+                                               Key, Value, Tstamp, false),
             case bitcask_nifs:keydir_put(State2#bc_state.keydir, Key,
                                          bitcask_fileops:file_tstamp(WriteFile2),
                                          Size, Offset, Tstamp,
@@ -1449,23 +1400,39 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     {ok, WriteFile3} = bitcask_fileops:un_write(WriteFile2),
                     State3 = wrap_write_file(
                                State2#bc_state { write_file = WriteFile3 }),
-                    do_put(Key, Value, State3, Retries - 1,
-                           already_exists, ValueType)
+                    do_put(Key, Value, State3, Retries - 1, already_exists)
             end;
         tombstone ->
-            case bitcask_nifs:keydir_get(State2#bc_state.keydir, Key, State#bc_state.read_write_p) of
+            WriteFileId = bitcask_fileops:file_tstamp(State2#bc_state.write_file),
+            case bitcask_nifs:keydir_get(State2#bc_state.keydir, Key,
+                                         State#bc_state.read_write_p) of
                 not_found ->
-                    {ok, State2#bc_state { write_file = WriteFile2 }};
-                E when is_record(E, bitcask_entry) ->
-                    case E#bitcask_entry.file_id > 
-                        bitcask_fileops:file_tstamp(WriteFile2) of 
-                        true ->
-                            %% we've hit the merge edge case above, and need to
-                            %% try again
-                            State3 = wrap_write_file(State2#bc_state { write_file = WriteFile2 }),
+                    {ok, State2};
+                #bitcask_entry{file_id=OldFileId} when OldFileId > WriteFileId ->
+                    State3 = wrap_write_file(State2),
+                    do_put(Key, Value, State3, Retries - 1, already_exists);
+                #bitcask_entry{tstamp=OldTstamp, file_id=OldFileId,
+                               offset=OldOffset} ->
+                    Tombstone = <<?TOMBSTONE_V2_STR, OldFileId:32,
+                                  OldOffset:64>>,
+                    {ok, WriteFile2, _, _} =
+                        bitcask_fileops:write(State2#bc_state.write_file,
+                                              Key, Tombstone, Tstamp, true),
+
+                    case bitcask_nifs:keydir_remove(State2#bc_state.keydir,
+                                                    Key, OldTstamp, OldFileId,
+                                                    OldOffset) of
+                        already_exists ->
+                            {ok, WriteFile3} =
+                                bitcask_fileops:un_write(WriteFile2),
+                            % Merge updated the keydir after tombstone write.
+                            % beat us, so undo and retry in a new file.
+                            State3 = wrap_write_file(
+                                       State2#bc_state {
+                                         write_file = WriteFile3 }),
                             do_put(Key, Value, State3, 
-                                   Retries - 1, already_exists, ValueType);
-                        false ->
+                                   Retries - 1, already_exists);
+                        ok ->
                             {ok, State2#bc_state { write_file = WriteFile2 }}
                     end
             end

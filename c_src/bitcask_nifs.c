@@ -1245,8 +1245,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
 
         DEBUG("+++ Get issued\r\n");
 
-        int iterating_status = (rw_p == MAGIC_OVERRIDE_ITERATING_STATUS) ?
-            0 : handle->iterating;
+        int iterating_status = time == MAX_TIME ? 0 : handle->iterating;
         find_result f;
         find_keydir_entry(keydir, &key, time, iterating_status, &f);
 
@@ -1368,6 +1367,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_
         }
         else // not found
         {
+            DEBUG("Not found - not removed\r\n");
             UNLOCK(keydir);
             return ATOM_OK;;
         }

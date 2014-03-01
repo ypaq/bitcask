@@ -29,7 +29,6 @@
          keydir_put/9,
          keydir_get/3,
          keydir_get/4,
-         keydir_get_always_latest/3,
          keydir_remove/2, keydir_remove/5,
          keydir_copy/1,
          keydir_fold/5,
@@ -60,11 +59,6 @@
 -on_load(init/0).
 
 -include("bitcask.hrl").
-
-%% Use a magic number for signaling that a database is both in read-write
-%% mode and that we want to do a get while ignoring the iteration status
-%% of the keydir.
--define(MAGIC_OVERRIDE_ITERATING_STATUS, 16#42424242).
 
 -ifdef(PULSE).
 -compile({parse_transform, pulse_instrument}).
@@ -104,8 +98,6 @@
 -spec keydir_get(reference(), binary(), integer()) ->
         not_found | #bitcask_entry{}.
 -spec keydir_get(reference(), binary(), integer(), integer()) ->
-        not_found | #bitcask_entry{}.
--spec keydir_get_always_latest(reference(), binary(), 1) ->
         not_found | #bitcask_entry{}.
 -spec keydir_get_int(reference(), binary(), integer(), integer()) ->
         not_found | #bitcask_entry{}.
@@ -214,9 +206,6 @@ keydir_put_int(_Ref, _Key, _FileId, _TotalSz, _Offset, _Tstamp, _NowSec,
 keydir_get(Ref, Key, ReadWriteP) ->
     keydir_get(Ref, Key, 16#ffffffff, ReadWriteP).
 
-keydir_get_always_latest(Ref, Key, 1 = _ReadWriteP) ->
-    keydir_get(Ref, Key, ?MAGIC_OVERRIDE_ITERATING_STATUS).
-
 keydir_get(Ref, Key, TStamp, ReadWriteP) when is_integer(ReadWriteP) ->
     case keydir_get_int(Ref, Key, TStamp, ReadWriteP) of
         E when is_record(E, bitcask_entry) ->
@@ -225,7 +214,6 @@ keydir_get(Ref, Key, TStamp, ReadWriteP) when is_integer(ReadWriteP) ->
         _ ->            
             not_found
     end.
-
 
 keydir_get_int(_Ref, _Key, _TStamp, _ReadWriteP) ->
     erlang:nif_error({error, not_loaded}).
