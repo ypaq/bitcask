@@ -26,6 +26,10 @@
 -compile({parse_transform, pulse_instrument}).
 -endif.
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 file_open(Filename, Opts) ->
     M = file_module(),
     M:file_open(Filename, Opts).
@@ -102,4 +106,29 @@ determine_file_module() ->
         _ ->
             bitcask_file
     end.
+-endif.
+
+-ifdef(TEST).
+
+truncate_test() ->
+    Fname = "/tmp/bc.test.bitcask_io/truncate_test.dat",
+    ?assertMatch(ok, filelib:ensure_dir(Fname)),
+    file:delete(Fname),
+    Open1 = file_open(Fname, [create]),
+    ?assertMatch({ok, _}, Open1),
+    {ok, File} = Open1,
+    % Write 100 bytes
+    Bytes = <<0:100/integer-unit:8>>,
+    ?assertEqual(100, size(Bytes)),
+    ok = file_write(File, Bytes),
+    % Truncate to 50 bytes
+    {ok, 50} = file_position(File, 50),
+    ok = file_truncate(File),
+    ok = file_close(File),
+    % Verify size with regular file operations
+    {ok, File3} = file:open(Fname, [read, raw, binary]),
+    SizeRes = file:position(File3, {eof, 0}),
+    ok = file:close(File3),
+    ?assertEqual({ok, 50}, SizeRes).
+
 -endif.

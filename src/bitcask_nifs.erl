@@ -54,7 +54,8 @@
          file_read/2,
          file_write/2,
          file_position/2,
-         file_seekbof/1]).
+         file_seekbof/1,
+         file_truncate/1]).
 
 -on_load(init/0).
 
@@ -428,6 +429,13 @@ file_seekbof(Ref) ->
     file_seekbof_int(Ref).
 
 file_seekbof_int(_Ref) ->
+    erlang:nif_error({error, not_loaded}).
+
+file_truncate(Ref) ->
+    bitcask_bump:big(),
+    file_truncate_int(Ref).
+
+file_truncate_int(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 
