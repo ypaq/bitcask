@@ -1642,19 +1642,16 @@ fold_visits_frozen_test(RollOver) ->
                 ok
         end,
 
-        % While we have timestamp resolution, we need to make sure the
-        % update time for the next ops is > freezing time
-        % to avoid a read race in the fold below
-        timer:sleep(2000),
-        
         %% A delete, an update and an insert
         ok = delete(B, <<"k">>),
         ok = put(B, <<"k2">>, <<"v2-2">>),
         ok = put(B, <<"k4">>, <<"v4">>),
-
+        
+        timer:sleep(900), %% wait for the disk to settle
         CollectAll = fun(K, V, Acc) ->
                              [{K, V} | Acc]
                      end,
+        %% force fold over the frozen keydir
         L = fold(B, CollectAll, [], -1, -1),
         ?assertEqual(default_dataset(), lists:sort(L)),
 
@@ -1665,7 +1662,7 @@ fold_visits_frozen_test(RollOver) ->
         %% test state, instead of using sleeps.
         timer:sleep(900),
         %% Check we see the updated fold
-        L2 = fold(B, CollectAll, [], -1, -1),
+        L2 = fold(B, CollectAll, []),
         ?assertEqual([{<<"k2">>,<<"v2-2">>},
                       {<<"k3">>,<<"v3">>},
                       {<<"k4">>,<<"v4">>}], lists:sort(L2))

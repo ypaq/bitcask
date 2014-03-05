@@ -768,10 +768,10 @@ static void find_keydir_entry(bitcask_keydir* keydir, ErlNifBinary* key,
     if (keydir->pending != NULL)
     {
         if (get_entries_hash(keydir->pending, key,
-                    &ret->itr, &ret->pending_entry)
-                && (tstamp >= ret->pending_entry->tstamp))
+                             &ret->itr, &ret->pending_entry)
+            && (epoch > ret->pending_entry->epoch))
         {
-            DEBUG("Found in pending %u > %u", tstamp, ret->pending_entry->tstamp);
+            DEBUG("Found in pending %llu > %llu", epoch, ret->pending_entry->epoch);
             ret->hash = keydir->pending;
             ret->entries_entry = NULL;
             ret->found = 1;
@@ -785,7 +785,7 @@ static void find_keydir_entry(bitcask_keydir* keydir, ErlNifBinary* key,
 
     // If a snapshot for that time is found in regular entries
     if (get_entries_hash(keydir->entries, key, &ret->itr, &ret->entries_entry)
-            && proxy_kd_entry_at_time(ret->entries_entry, tstamp, &ret->proxy))
+        && proxy_kd_entry_at_epoch(ret->entries_entry, epoch, &ret->proxy))
     {
         ret->hash = keydir->entries;
         ret->found = 1;
@@ -1289,7 +1289,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
         LOCK(keydir);
 
         DEBUG_BIN(dbgKey, key.data, key.size);
-        DEBUG("+++ Get %s time = %u\r\n", dbgKey, time);
+        DEBUG("+++ Get %s time = %lu\r\n", dbgKey, epoch);
 
         find_result f;
         find_keydir_entry(keydir, &key, epoch, &f);
@@ -1305,8 +1305,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
                                       enif_make_uint64_bin(env, f.proxy.offset),
                                       enif_make_uint(env, f.proxy.tstamp));
             DEBUG(" ... returned value file id=%u size=%u ofs=%u tstamp=%u tomb=%u\r\n",
-                    f.proxy.file_id, f.proxy.total_sz, f.proxy.offset, f.proxy.tstamp,
-                    (unsigned)f.proxy.is_tombstone);
+                  f.proxy.file_id, f.proxy.total_sz, f.proxy.offset, f.proxy.tstamp,
+                  (unsigned)f.proxy.is_tombstone);
             DEBUG_ENTRY(f.entries_entry ? f.entries_entry : f.pending_entry);
             UNLOCK(keydir);
             return result;
@@ -1405,6 +1405,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_
             {
                 set_pending_tombstone(fr.pending_entry);
                 fr.pending_entry->tstamp = remove_time;
+                fr.pending_entry->epoch = keydir->epoch;
             }
             // If frozen, add tombstone to pending hash (iteration must have
             // started between put/remove call in bitcask:delete.
@@ -1414,6 +1415,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_
                     add_entry(keydir, keydir->pending, &fr.proxy);
                 set_pending_tombstone(pending_entry);
                 pending_entry->tstamp = remove_time;
+                pending_entry->epoch = keydir->epoch;
             }
             // If not iterating, just remove.
             else if(keydir->keyfolders == 0)
@@ -1666,8 +1668,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
                 ErlNifBinary key;
                 bitcask_keydir_entry_proxy proxy;
 
-                if (!proxy_kd_entry_at_time(entry, handle->epoch, &proxy)
-                        || proxy.is_tombstone)
+                if (!proxy_kd_entry_at_epoch(entry, handle->epoch, &proxy)
+                    || proxy.is_tombstone)
                 {
                     DEBUG("No value for itr_next");
                     // No value in the snapshot for the iteration time
