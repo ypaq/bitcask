@@ -111,7 +111,13 @@ determine_file_module() ->
 -ifdef(TEST).
 
 truncate_test() ->
-    Fname = "/tmp/bc.test.bitcask_io/truncate_test.dat",
+    Dir = "/tmp/bc.test.bitcask_io/",
+    one_truncate(filename:join(Dir, "truncate_test1.dat"), 50, 50),
+    one_truncate(filename:join(Dir, "truncate_test2.dat"), {bof, 50}, 50),
+    one_truncate(filename:join(Dir, "truncate_test3.dat"), {cur, -25}, 75),
+    one_truncate(filename:join(Dir, "truncate_test4.dat"), {eof, -75}, 25).
+
+one_truncate(Fname, Ofs, ExpectedSize) ->
     ?assertMatch(ok, filelib:ensure_dir(Fname)),
     file:delete(Fname),
     Open1 = file_open(Fname, [create]),
@@ -121,14 +127,13 @@ truncate_test() ->
     Bytes = <<0:100/integer-unit:8>>,
     ?assertEqual(100, size(Bytes)),
     ok = file_write(File, Bytes),
-    % Truncate to 50 bytes
-    {ok, 50} = file_position(File, 50),
+    ?assertEqual({Ofs, {ok, ExpectedSize}}, {Ofs, file_position(File, Ofs)}),
     ok = file_truncate(File),
     ok = file_close(File),
     % Verify size with regular file operations
     {ok, File3} = file:open(Fname, [read, raw, binary]),
     SizeRes = file:position(File3, {eof, 0}),
     ok = file:close(File3),
-    ?assertEqual({ok, 50}, SizeRes).
+    ?assertEqual({ok, ExpectedSize}, SizeRes).
 
 -endif.

@@ -37,16 +37,6 @@
 
 #include <stdio.h>
 
-void DEBUG2(const char *fmt, ...) { }
-/* #include <stdarg.h> */
-/* void DEBUG2(const char *fmt, ...) */
-/* { */
-/*     va_list ap; */
-/*     va_start(ap, fmt); */
-/*     vfprintf(stderr, fmt, ap); */
-/*     va_end(ap); */
-/* } */
-
 #ifdef BITCASK_DEBUG
 #include <stdarg.h>
 #include <ctype.h>
@@ -320,6 +310,9 @@ static ERL_NIF_TERM ATOM_EOF;
 static ERL_NIF_TERM ATOM_CREATE;
 static ERL_NIF_TERM ATOM_READONLY;
 static ERL_NIF_TERM ATOM_O_SYNC;
+// lseek equivalents for file_position
+static ERL_NIF_TERM ATOM_CUR;
+static ERL_NIF_TERM ATOM_BOF;
 
 // Prototypes
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
@@ -2318,17 +2311,57 @@ ERL_NIF_TERM bitcask_nifs_file_write(ErlNifEnv* env, int argc, const ERL_NIF_TER
     }
 }
 
+// Returns 0 if failed to parse lseek style argument for file_position
+static int parse_seek_offset(ErlNifEnv* env, ERL_NIF_TERM arg, off_t * ofs, int * whence)
+{
+    long long_ofs;
+    int arity;
+    const ERL_NIF_TERM* tuple_elements;
+    if (enif_get_long(env, arg, &long_ofs))
+    {
+        *whence = SEEK_SET;
+        *ofs = (off_t)long_ofs;
+        return 1;
+    }
+    else if (enif_get_tuple(env, arg, &arity, &tuple_elements) && arity == 2
+            && enif_get_long(env, tuple_elements[1], &long_ofs))
+    {
+        *ofs = (off_t)long_ofs;
+        if (tuple_elements[0] == ATOM_CUR)
+        {
+            *whence = SEEK_CUR;
+        }
+        else if (tuple_elements[0] == ATOM_BOF)
+        {
+            *whence = SEEK_SET;
+        }
+        else if (tuple_elements[0] == ATOM_EOF)
+        {
+            *whence = SEEK_END;
+        }
+        else
+        {
+            return 0;
+        }
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
 ERL_NIF_TERM bitcask_nifs_file_position(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     bitcask_file_handle* handle;
-    unsigned long offset_ul;
+    off_t offset;
+    int whence;
 
     if (enif_get_resource(env, argv[0], bitcask_file_RESOURCE, (void**)&handle) &&
-        enif_get_ulong(env, argv[1], &offset_ul))
+        parse_seek_offset(env, argv[1], &offset, &whence))
     {
 
-        off_t offset = offset_ul;
-        off_t new_offset = lseek(handle->fd, offset, SEEK_SET);
+        off_t new_offset = lseek(handle->fd, offset, whence);
         if (new_offset != -1)
         {
             return enif_make_tuple2(env, ATOM_OK, enif_make_ulong(env, new_offset));
@@ -2716,6 +2749,8 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_CREATE = enif_make_atom(env, "create");
     ATOM_READONLY = enif_make_atom(env, "readonly");
     ATOM_O_SYNC = enif_make_atom(env, "o_sync");
+    ATOM_CUR = enif_make_atom(env, "cur");
+    ATOM_BOF = enif_make_atom(env, "bof");
 
 #ifdef PULSE
     pulse_c_send_on_load(env);

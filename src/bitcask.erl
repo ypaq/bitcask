@@ -1818,6 +1818,7 @@ finish_worker_loop(Pid) ->
 fold_visits_unfrozen_test(RollOver) ->
     %%?debugFmt("rollover is ~p~n", [RollOver]),
     Cask = "/tmp/bc.test.unfrozenfold",
+    bitcask_time:test__set_fudge(1),
     B = init_dataset(Cask, default_dataset()),
     try
         Pid = spawn(fun slow_worker/0),
@@ -1837,6 +1838,11 @@ fold_visits_unfrozen_test(RollOver) ->
         after 10*1000 ->
                 error(timeout_should_never_happen)
         end,
+
+        %% Until time independent epochs are merged, the fold timestamp
+        %% is used to determine the snapshot, which has a 1 second resolution.
+        %% So make sure updates happen at least 1 sec after folding starts
+        bitcask_time:test__incr_fudge(1),
         
         %% A delete, an update and an insert
         ok = delete(B, <<"k">>),
@@ -1862,7 +1868,8 @@ fold_visits_unfrozen_test(RollOver) ->
                       {<<"k4">>,<<"v4">>}], lists:sort(L2))
         %%?debugFmt("got past the asserts??~n", [])
     after
-        bitcask:close(B)
+        bitcask:close(B),
+        bitcask_time:test__clear_fudge()
     end.
     
 open_test() ->

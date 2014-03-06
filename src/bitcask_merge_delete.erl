@@ -335,6 +335,7 @@ new_20131217_a_body() ->
     _Var1017 = erlang:apply(MOD,fold,[_Var106]),
     {ok, V3} = get(_Var106, 13),                  %not from EQC
     bc_close(_Var106),
+    bitcask_time:test__clear_fudge(),
     ?assertEqual(V1017_expected, lists:sort(_Var1017)),
     ok.
 
@@ -366,6 +367,7 @@ new_20131217_c_body() ->
     _Var33 = erlang:apply(MOD,fold,[_Var28]),
     not_found = MOD:get(_Var28,4),
     bc_close(_Var28),
+    bitcask_time:test__clear_fudge(),
 
     Expected33 = [{1,Val2},{2,Val2},{3,Val2}],
     ?assertEqual(Expected33, lists:sort(_Var33)),
@@ -480,6 +482,7 @@ new_20131217_e_body() ->
     _Var54 = erlang:apply(MOD,bc_close,[_Var12]),
     _Var56 = erlang:apply(MOD,bc_open,[TestDir,MFS]),
     _Var63 = erlang:apply(MOD,fold,[_Var56]),
+    bitcask_time:test__clear_fudge(),
     ?assertEqual(V63_expected, lists:sort(_Var63)),
     ok.
 

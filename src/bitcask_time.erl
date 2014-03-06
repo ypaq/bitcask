@@ -22,8 +22,10 @@
 -module(bitcask_time).
 
 -export([tstamp/0]).
--export([test__set_fudge/1, test__get_fudge/0, test__incr_fudge/1]).
+-export([test__set_fudge/1, test__get_fudge/0, test__incr_fudge/1,
+        test__clear_fudge/0]).
 
+-include_lib("eunit/include/eunit.hrl").
 -define(KEY, bitcask_time_fudge).
 
 %% Return number of seconds since 1970
@@ -31,6 +33,7 @@ tstamp() ->
     test__get(?KEY).
 
 test__set_fudge(Amount) ->
+    bitcask_time:test__clear_fudge(),
     application:set_env(bitcask, ?KEY, Amount).
 
 test__get_fudge() ->
@@ -56,6 +59,17 @@ test__get(Key) ->
             (Mega * 1000000) + Sec;
         yes_testing ->
             {ok, Fudge} = application:get_env(bitcask, Key),
+            ?debugFmt("Using test time ~p", [Fudge]),
             Fudge
     end.
+
+test__clear_fudge() ->
+    application:unset_env(bitcask, ?KEY),
+    case get(?KEY) of
+        undefined ->
+            ok;
+        _ ->
+            put(?KEY, undefined)
+    end,
+    ok.
 
