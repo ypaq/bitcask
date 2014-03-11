@@ -1174,6 +1174,10 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
         // If conditional put and not found, bail early
         if ((!f.found || f.proxy.is_tombstone) && old_file_id != 0)
         {
+            if (entry.file_id > keydir->biggest_file_id)
+            {
+                keydir->biggest_file_id = entry.file_id;
+            }
             UNLOCK(keydir);
             return ATOM_ALREADY_EXISTS;
         }
@@ -1215,6 +1219,10 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
               old_offset == f.proxy.offset))
         {
             DEBUG("++ Conditional not match\r\n");
+            if (entry.file_id > keydir->biggest_file_id)
+            {
+                keydir->biggest_file_id = entry.file_id;
+            }
             UNLOCK(keydir);
             return ATOM_ALREADY_EXISTS;
         }
@@ -1263,6 +1271,10 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
             {
                 update_fstats(env, keydir, entry.file_id, entry.tstamp,
                               0, 1, 0, entry.total_sz);
+            }
+            if (entry.file_id > keydir->biggest_file_id)
+            {
+                keydir->biggest_file_id = entry.file_id;
             }
             UNLOCK(keydir);
             DEBUG("No update\r\n");

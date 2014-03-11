@@ -942,6 +942,13 @@ scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile,
     case bitcask_fileops:open_file(Filename) of
         {ok, File} ->
             FileTstamp = bitcask_fileops:file_tstamp(File),
+            try
+                already_exists = bitcask_nifs:keydir_put(
+                                   KeyDir, <<"kk01">>, %% Tempt fate with PULSE 
+                                   FileTstamp, 42, 42, 42, 42, (1 bsl 63) - 1)
+            catch _:_ ->
+                    throw({invariant, file, FileTstamp, ?MODULE, ?LINE})
+            end,
             F = fun(K, Tstamp, {Offset, TotalSz}, _) ->
                         bitcask_nifs:keydir_put(KeyDir,
                                                 KT(K),
@@ -1037,7 +1044,10 @@ init_keydir_scan_key_files(Dirname, KeyDir, KT, Count) ->
     try
         SortedFiles = readable_files(Dirname),
         _ = scan_key_files(SortedFiles, KeyDir, [], true, false, KT)
-    catch _:_ ->
+    catch
+        throw:AssertionError ->
+            exit({assertion, AssertionError});
+        _:_ ->
             init_keydir_scan_key_files(Dirname, KeyDir, KT, Count - 1)
     end.
 
