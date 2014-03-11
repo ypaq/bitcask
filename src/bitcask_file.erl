@@ -23,6 +23,11 @@
 -compile(export_all).
 -behaviour(gen_server).
 
+-ifdef(PULSE).
+-compile({parse_transform, pulse_instrument}).
+-compile(export_all).
+-endif.
+
 %% API
 
 %% gen_server callbacks
