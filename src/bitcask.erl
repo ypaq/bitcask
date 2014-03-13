@@ -322,12 +322,10 @@ fold_keys(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
             true ->
                 Acc;
             false ->
-                TSize1 = ?TOMBSTONE_V1_SIZE,
-                TSize2 = ?TOMBSTONE_V2_SIZE,
+                TSize = ?TOMBSTONE_SIZE,
                 case BCEntry#bitcask_entry.total_sz -
                             (?HEADER_SIZE + size(Key)) of
-                    Ss when Ss == TSize1; Ss == TSize2 ->
-                        %% might be a deleted record, so check
+                    TSize ->  % might be a deleted record, so check
                         case ?MODULE:get(Ref, Key) of
                             not_found when not SeeTombstonesP ->
                                 Acc;
@@ -598,29 +596,24 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
     put_state(LiveRef, #bc_state{dirname = Dirname, keydir = LiveKeyDir}),
     {_KeyCount, Summary} = summary_info(LiveRef),
     erlang:erase(LiveRef),
-    TooNew = [F#file_status.filename ||
-                 F <- Summary,
-                 F#file_status.newest_tstamp >= MergeStart],
-    {InFiles,InExpiredFiles} = lists:foldl(fun(F, {InFilesAcc,InExpiredAcc} = Acc) ->
-                                    case lists:member(F#filestate.filename,
-                                                      TooNew) of
-                                        false ->
+    {InFiles2,InExpiredFiles} = lists:foldl(fun(F, {InFilesAcc,InExpiredAcc} = Acc) ->
                                             case lists:member(F#filestate.filename,
                                                     ExpiredFiles) of
                                                 false ->
                                                     {[F|InFilesAcc],InExpiredAcc};
                                                 true ->
                                                     {InFilesAcc,[F|InExpiredAcc]}
-                                            end;
-                                        true ->
-                                            bitcask_fileops:close(F),
-                                            Acc
-                                    end
+                                            end
                             end, {[],[]}, InFiles1),
     {_, _, Fstats, _} = bitcask_nifs:keydir_info(LiveKeyDir),
     AllFilesIds = [FileId || {FileId, _LiveCount, _TotalCount, _LiveBytes,
                               _TotalBytes, _OldestTstamp,
                               _NewestTstamp} <- Fstats],
+    % This sort is very important. The merge expects to visit files in order
+    % to properly detect current values, and could resurrect old values if not.
+    InFiles = lists:sort(fun(#filestate{tstamp=FTL}, #filestate{tstamp=FTR}) ->
+                                 FTL =< FTR
+                         end, InFiles2),
     InFilesIds = [F#filestate.tstamp || F <- InFiles],
     InExpiredFilesIds = [F#filestate.tstamp || F <- InExpiredFiles],
     %% AllFilesSet contains the list of fileids that will remain
@@ -919,9 +912,7 @@ to_lower_grace_time_bound(X) ->
 
 expiry_grace_time(Opts) -> to_lower_grace_time_bound(get_opt(expiry_grace_time, Opts)).
 
-is_tombstone(?TOMBSTONE_V1) ->
-    true;
-is_tombstone(<<?TOMBSTONE_V2_STR, _FileId:32, _Offset:64>>) ->
+is_tombstone(?TOMBSTONE) ->
     true;
 is_tombstone(_) ->
     false.
@@ -1148,26 +1139,43 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                      State#mstate.merge_epoch, false,
                      [State#mstate.live_keydir, State#mstate.del_keydir]) of
         true ->
-            State2 = case V of
-                <<?TOMBSTONE_V2_STR, DeadFileId:32, _DeadOffset:64>> ->
-                    case sets:is_element(DeadFileId, State#mstate.after_fileids) of
+            State;
+        expired ->
+            %% Note: we would drop a tombstone if it expired. Under normal
+            %% circumstances it's OK as any value older than that is expired
+            %% too and you wouldn't see values coming back to life after a
+            %% merge and reopen.  However with a clock going back in time,
+            %% and badly timed quick merges you could end up seeing an old
+            %% value after we drop a tombstone that has a lower timestamp
+            %% than a value that was actually written before until that value
+            %% expires too.
+            %% NOTE: This remove is conditional on an exact match on
+            %%       Tstamp + FileId + Offset
+            bitcask_nifs:keydir_remove(State#mstate.live_keydir, K,
+                                       Tstamp, FileId, Offset),
+            State;
+        not_found ->
+            case is_tombstone(V) of
+                true ->
+                    % A tombstone for a deleted value, remember the delete
+                    ok = bitcask_nifs:keydir_put(State#mstate.del_keydir, K,
+                                                 FileId, 0, Offset, Tstamp,
+                                                 bitcask_time:tstamp()),
+                    case State#mstate.partial of
                         true ->
                             inner_merge_write(K, V, Tstamp, FileId, Offset,
                                               false, State);
-                        _ ->
+                        false ->
                             State
                     end;
-                _ ->
+                false ->
                     State
-            end,
-            %% NOTE: This remove is conditional on an exact match on
-            %%       Tstamp + FileId + Offset
-            bitcask_nifs:keydir_remove(State2#mstate.live_keydir, K,
-                                       Tstamp, FileId, Offset),
-            State2;
+            end;
         false ->
             case is_tombstone(V) of
                 true ->
+                    %% We have seen a tombstone for this key before, but this
+                    %% one is newer than that one.
                     ok = bitcask_nifs:keydir_put(State#mstate.del_keydir, K,
                                                  FileId, 0, Offset, Tstamp,
                                                  bitcask_time:tstamp()),
@@ -1177,13 +1185,18 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                     %% whatever is in the live keydir IIF the
                     %% tstamp/fileid we have matches the current
                     %% entry.
+                    %% Note: The keydir does not keep the file/offset info
+                    %% for a tombstone, so I don't think we can ever remove
+                    %% something here.
                     bitcask_nifs:keydir_remove(State#mstate.live_keydir, K,
                                                Tstamp, FileId, Offset),
 
                     case State#mstate.partial of
-                        true -> inner_merge_write(K, V, Tstamp, FileId, Offset,
+                        true ->
+                                inner_merge_write(K, V, Tstamp, FileId, Offset,
                                                   false, State);
-                        false -> State
+                        false ->
+                            State
                     end;
                 false ->
                     ok = bitcask_nifs:keydir_remove(State#mstate.del_keydir, K),
@@ -1271,11 +1284,14 @@ out_of_date(_State, _Key, _Tstamp, _FileId, _Pos, _ExpiryTime,
             _MergeEpoch, EverFound, []) ->
     %% if we ever found it, and none of the entries were out of date,
     %% then it's not out of date
-    EverFound == false;
+    case EverFound of
+        true -> false;
+        false -> not_found
+    end;
 out_of_date(_State, _Key, Tstamp, _FileId, _Pos, ExpiryTime,
             _EverFound, _MergeEpoch, _KeyDirs)
   when Tstamp < ExpiryTime ->
-    true;
+    expired;
 out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
             ExpiryTime, MergeEpoch, EverFound, [KeyDir|Rest]) ->
     case bitcask_nifs:keydir_get(KeyDir, Key, MergeEpoch) of
@@ -1287,10 +1303,12 @@ out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
             if
                 E#bitcask_entry.tstamp == Tstamp ->
                     %% Exact match. In this situation, we use the file
-                    %% id and offset as a tie breaker. The assumption
-                    %% is that the merge starts with the newest files
-                    %% first, thus we want data from the highest
-                    %% file_id and the highest offset in that file.
+                    %% id and offset as a tie breaker.
+                    %% The assumption is that newer values are written to
+                    %% higher file ids and offsets, even in the case of a merge
+                    %% racing with the write process, as the writer process
+                    %% will detect that and retry the write to an even higher
+                    %% file id.
                     if
                         E#bitcask_entry.file_id > FileId ->
                             true;
@@ -1421,8 +1439,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     do_put(Key, Value, State3, Retries - 1, already_exists);
                 #bitcask_entry{tstamp=OldTstamp, file_id=OldFileId,
                                offset=OldOffset} ->
-                    Tombstone = <<?TOMBSTONE_V2_STR, OldFileId:32,
-                                  OldOffset:64>>,
+                    Tombstone = ?TOMBSTONE,
                     {ok, WriteFile2, _, _} =
                         bitcask_fileops:write(State2#bc_state.write_file,
                                               Key, Tombstone, Tstamp, true),

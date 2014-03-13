@@ -67,7 +67,7 @@ apply_kv_ops([{delete, K, _} | Rest], Ref, KVs0, Fstats0) ->
         OldVal ->
             apply_kv_ops(Rest, Ref, orddict:store(K, deleted, KVs0),
                          update_fstats(delete, K, OldVal,
-                                       ?TOMBSTONE_V1, Fstats0))
+                                       ?TOMBSTONE, Fstats0))
     end;
 apply_kv_ops([{itr, _K, _} | Rest], Ref, KVs, Fstats) ->
     %% Don't care about result, just want to intermix with get/put

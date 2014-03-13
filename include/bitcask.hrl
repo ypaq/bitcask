@@ -28,13 +28,9 @@
 
 -define(FMT(Str, Args), lists:flatten(io_lib:format(Str, Args))).
 
--define(TOMBSTONE_V1, <<"bitcask_tombstone">>).
--define(TOMBSTONE_V1_SIZE, size(?TOMBSTONE_V1)).
--define(TOMBSTONE_V2_STR, "bitcask_tombstone2").
--define(TOMBSTONE_V2,<<?TOMBSTONE_V2_STR>>).
-% Size of tombstone2 + file id + offset
--define(TOMBSTONE_V2_SIZE, (size(?TOMBSTONE_V2)+8+4)).
--define(MAX_TOMBSTONE_SIZE, ?TOMBSTONE_V2_SIZE).
+-define(TOMBSTONE, <<"bitcask_tombstone">>).
+-define(TOMBSTONE_SIZE, size(?TOMBSTONE)).
+-define(MAX_TOMBSTONE_SIZE, ?TOMBSTONE_SIZE).
 
 -define(OFFSETFIELD_V1,  64).
 -define(TOMBSTONEFIELD_V2, 1).

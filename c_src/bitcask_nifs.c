@@ -1238,8 +1238,20 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
             return ATOM_OK;
         }
 
-        // If conditional put and no match, bail
+        // Putting only if replacing this file/offset entry, fail otherwise.
+        // This is an important part of our optimistic concurrency mechanisms
+        // to resolve races between writers (main and merge currently).
         if (old_file_id != 0 &&
+                // This line is tricky: We are trying to detect a merge putting
+                // a value that replaces another value that same merge just put
+                // (so same output file).  Because when it does that, it has
+                // replaced a previous value with smaller file/offset.  It then
+                // found yet another value that is also current and should
+                // be written to the merge file, but since it has smaller file/ofs
+                // than the newly merged value (in a new merge file), it is
+                // ignored. This happens with values from the same second,
+                // since the out of date logic in merge uses timestamps.
+            (newest_put || entry.file_id != f.proxy.file_id) &&
             !(old_file_id == f.proxy.file_id &&
               old_offset == f.proxy.offset))
         {
