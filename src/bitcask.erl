@@ -594,9 +594,8 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
     MergeEpoch = bitcask_nifs:keydir_get_epoch(LiveKeyDir),
     LiveRef = make_ref(),
     put_state(LiveRef, #bc_state{dirname = Dirname, keydir = LiveKeyDir}),
-    {_KeyCount, Summary} = summary_info(LiveRef),
     erlang:erase(LiveRef),
-    {InFiles2,InExpiredFiles} = lists:foldl(fun(F, {InFilesAcc,InExpiredAcc} = Acc) ->
+    {InFiles2,InExpiredFiles} = lists:foldl(fun(F, {InFilesAcc,InExpiredAcc}) ->
                                             case lists:member(F#filestate.filename,
                                                     ExpiredFiles) of
                                                 false ->
