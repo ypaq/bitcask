@@ -1,8 +1,8 @@
-%%% File        : bitcask_eqc.erl
+%%% File        : bitcask_pulse.erl
 %%% Author      : Ulf Norell, Hans Svensson
 %%% Description : Bitcask stress testing
 %%% Created     : 19 Mar 2012 by Ulf Norell
--module(bitcask_eqc).
+-module(bitcask_pulse).
 
 %% The while module is ifdef:ed, rebar should set PULSE
 -ifdef(PULSE).
@@ -12,7 +12,7 @@
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 
--include("../../include/bitcask.hrl").
+-include("bitcask.hrl").
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -30,7 +30,12 @@
 %% Number of keys used in the tests
 -define(NUM_KEYS, 50).
 %% max_file_size given to bitcask.
--define(FILE_SIZE, 1000).
+-define(FILE_SIZE, 400).
+%% Signal that Bitcask is under test
+-define(BITCASK_TESTING_KEY, bitcask_testing_module).
+%% Max number of forks to run simultaneously.  Too many means huge pauses
+%% while PULSE & postcondition checking operates.
+-define(FORK_CONC_LIMIT, 2).
 
 %% Used for output within EUnit...
 -define(QC_FMT(Fmt, Args),
@@ -68,17 +73,26 @@ not_commands(Module, State) ->
 command(S) ->
   frequency(
     [ {2, {call, ?MODULE, fork, [not_commands(?MODULE, #state{ is_writer = false })]}}
-      || S#state.is_writer ] ++
-    [ {30, {call, ?MODULE, incr_clock, []}}
+      || S#state.is_writer andalso length(S#state.readers) < ?FORK_CONC_LIMIT] ++
+      %% || S#state.is_writer ] ++
+    [ {3, {call, ?MODULE, incr_clock, []}}
       %% Any proc can call incr_clock
     ] ++
-    [ {10, {call, ?MODULE, get, [S#state.handle, key()]}}
+    %% Move 'get' and 'put' methods to low frequency.  'fold' is the
+    %% best for catching race bugs because it checks all keys instead of
+    %% only one.  'puts' is much more effective also than 'put' because
+    %% 'puts' operates on several keys at once.
+    [ {10, {call, ?MODULE, gets, [S#state.handle, key_pair()]}}
       || S#state.handle /= undefined ] ++
-    [ {20, {call, ?MODULE, put, [S#state.handle, key(), value()]}}
+    [ {3, {call, ?MODULE, put, [S#state.handle, key(), value()]}}
       || S#state.is_writer, S#state.handle /= undefined ] ++
-    [ {20, {call, ?MODULE, puts, [S#state.handle, key_pair(), value()]}}
+    [ {10, {call, ?MODULE, puts, [S#state.handle, key_pair(), value()]}}
       || S#state.is_writer, S#state.handle /= undefined ] ++
-    [ {6, {call, ?MODULE, delete, [S#state.handle, key()]}}
+    %% Use a high rate for delete: we have a good chance of actually
+    %% deleting something that was in a prior 'puts' range of keys.
+    %% And we know that delete+merge has been a good source of
+    %% race bugs, so keep doing it.
+    [ {50, {call, ?MODULE, delete, [S#state.handle, key()]}}
       || S#state.is_writer, S#state.handle /= undefined ] ++
     [ {2, {call, ?MODULE, bc_open, [S#state.is_writer]}}
       || S#state.handle == undefined ] ++
@@ -86,28 +100,36 @@ command(S) ->
       || S#state.handle /= undefined ] ++
     [ {1, {call, ?MODULE, fold_keys, [S#state.handle]}}
       || S#state.handle /= undefined ] ++
-    [ {1, {call, ?MODULE, fold, [S#state.handle]}}
+    [ {7, {call, ?MODULE, fold, [S#state.handle]}}
       || S#state.handle /= undefined ] ++
-    [ {1, {call, ?MODULE, bc_close, [S#state.handle]}}
+    %% We want to call close quite frequently, because historically
+    %% there has been problems with delete/tombstones that only appear
+    %% after closing & opening.
+    [ {10, {call, ?MODULE, bc_close, [S#state.handle]}}
       || S#state.handle /= undefined ] ++
-    %% [ {1, {call, ?MODULE, merge, [S#state.handle]}}
-    %%   || S#state.is_writer, not S#state.did_fork_merge, S#state.handle /= undefined ] ++
-    [ {12, {call, ?MODULE, fork_merge, [S#state.handle]}}
+    [ {12, {call, ?MODULE, merge, [S#state.handle]}}
+      || S#state.is_writer, not S#state.did_fork_merge, S#state.handle /= undefined ] ++
+    [ {1, {call, ?MODULE, fork_merge, [S#state.handle]}}
       || S#state.is_writer, S#state.handle /= undefined ] ++
+    %% Disable 'join_reader' for now.
     [ {0, {call, ?MODULE, join_reader, [elements(S#state.readers)]}}
       || S#state.is_writer, S#state.readers /= []] ++
-    [ {1, {call, ?MODULE, kill, [elements([bitcask_merge_worker|S#state.readers])]}}
+    %% Disable 'kill' for now: this model has a flaw and needs some
+    %% fixing to avoid false positives.
+    %% TODO: fix it.  :-)
+    [ {0, {call, ?MODULE, kill, [elements([bitcask_merge_worker|S#state.readers])]}}
       || S#state.is_writer, S#state.handle /= undefined ] ++
-    [ {12, {call, ?MODULE, needs_merge, [S#state.handle]}}
+    [ {2, {call, ?MODULE, needs_merge, [S#state.handle]}}
       || S#state.is_writer, S#state.handle /= undefined ] ++
     []).
 
 %% Precondition, checked before a command is added to the command sequence.
 precondition(S, {call, _, fork, _}) ->
-  S#state.is_writer;
+  length(S#state.readers) < ?FORK_CONC_LIMIT andalso
+    S#state.is_writer;
 precondition(_S, {call, _, incr_clock, _}) ->
   true;
-precondition(S, {call, _, get, [H, _]}) ->
+precondition(S, {call, _, gets, [H, _]}) ->
   S#state.handle == H;
 precondition(S, {call, _, puts, [H, _, _]}) ->
   S#state.is_writer andalso S#state.handle == H;
@@ -201,8 +223,9 @@ postcondition(_S, {call, _, needs_merge, _}, V) ->
     false          -> true;
     _              -> {needs_merge, V}
   end;
-postcondition(_S, {call, _, bc_open, _}, V) ->
+postcondition(_S, {call, _, bc_open, [IsWriter]}, V) ->
   case V of
+    _ when is_reference(V) andalso IsWriter -> check_no_tombstones(V, true);
     _ when is_reference(V)                  -> true;
     {'EXIT', {{badmatch,{error,enoent}},_}} -> true;
     %% If we manage to get a timeout, there's a pathological scheduling
@@ -211,11 +234,15 @@ postcondition(_S, {call, _, bc_open, _}, V) ->
     {error, timeout}                        -> {dont_want_this_timeout, V};
     _                                       -> {bc_open, V}
   end;
-postcondition(_S, {call, _, get, _}, V) ->
-  case V of
-    {ok, _}   -> true;
-    not_found -> true;
-    _         -> {get, V}
+postcondition(_S, {call, _, gets, _}, Vs) ->
+   case [X || X <- Vs,
+           X /= not_found andalso
+                  not (is_tuple(X) andalso
+                       tuple_size(X) == 2 andalso
+                       element(1, X) == ok andalso
+                       is_binary(element(2, X)))] of
+     [] -> true;
+     _  -> {gets, Vs}
   end;
 postcondition(_S, {call, _, _, _}, _V) ->
   true.
@@ -249,7 +276,7 @@ start_node(Verbose) ->
     _ -> ok
   end,
   stop_node(),
-  {ok, _} = slave:start(host(), slave_name(), "-pa ../../../ebin " ++
+  {ok, _} = slave:start(host(), slave_name(), "-pa ./.eunit -pz ./ebin ./deps/*/ebin " ++
                           lists:append(["-detached" || not Verbose ])),
   ok.
 
@@ -257,10 +284,10 @@ stop_node() ->
   slave:stop(node_name()).
 
 run_on_node(local, _Verbose, M, F, A) ->
-  rpc:call(node(), M, F, A);
+  rpc:call(node(), M, F, A, 45*60*1000);
 run_on_node(slave, Verbose, M, F, A) ->
   start_node(Verbose),
-  rpc:call(node_name(), M, F, A).
+  rpc:call(node_name(), M, F, A, 45*60*1000).
 
 %% Muting the QuickCheck license printout from the slave node
 mute(true,  Fun) -> Fun();
@@ -301,7 +328,7 @@ run_commands_on_node(LocalOrSlave, Cmds, Seed, Verbose) ->
         end, [{seed, Seed},
               {strategy, unfair}]),
       Schedule = pulse:get_schedule(),
-      Errors = gen_event:call(error_logger, handle_errors, get_errors),
+      Errors = gen_event:call(error_logger, handle_errors, get_errors, 60*1000),
       {H, S, Res, PidRs, Trace, Schedule, Errors}
     catch
       _:Err ->
@@ -317,19 +344,31 @@ prop_pulse(Boolean) ->
     prop_pulse(local, Boolean).
 
 prop_pulse(LocalOrSlave, Verbose) ->
-  More = 2,
-  if More < 2 -> [erlang:display({"NOTE: we are using a perhaps small More value?", More}) || _ <- lists:seq(1,10)]; true -> ok end,
-  ?FORALL(Cmds, ?LET(Cmds, more_commands(More, commands(?MODULE)), shrink_commands(Cmds)),
+  P = ?FORALL(Cmds, commands(?MODULE),
+  ?IMPLIES(length(Cmds) > 0,
+  ?LET(Shrinking, parameter(shrinking, false),
+  ?ALWAYS(if Shrinking -> 10; % re-do this many times in shrinking runs
+             true      -> 2   % re-do this many times in normal runs
+          end,
   ?FORALL(Seed, pulse:seed(),
   begin
-    %% ok = file:write_file("/tmp/slf-stuff-just-in-case", term_to_binary({Cmds,Seed})),
     case run_on_node(LocalOrSlave, Verbose, ?MODULE, run_commands_on_node, [LocalOrSlave, Cmds, Seed, Verbose]) of
       {'EXIT', Err} ->
         equals({'EXIT', Err}, ok);
+      {badrpc, timeout} = Bad ->
+        io:format(user, "GOT ~p, aborting.  Stop PULSE and restart!\n", [Bad]),
+        exit({stopping, Bad});
       {H, S, Res, PidRs, Trace, Schedule, Errors} ->
         ?WHENFAIL(
           ?QC_FMT("\nState: ~p\n", [S]),
           aggregate(zipwith(fun command_data/2, Cmds, H),
+          measure(len_cmds, length(Cmds),
+          measure(deep_len_cmds, lists:foldl(
+                              fun({set,_,{call, _, fork, [L]}}, Acc) ->
+                                      Acc + length(L);
+                                 (_, Acc) ->
+                                      Acc + 1
+                              end, 0, Cmds),
           measure(schedule, length(Schedule),
           %% In the end we check four things:
           %% - That the root process (the writer) returns ok (passes all postconditions)
@@ -340,17 +379,52 @@ prop_pulse(LocalOrSlave, Verbose) ->
             [ {0, equals(Res, ok)}
             | [ {Pid, equals(R, ok)} || {Pid, R} <- PidRs ] ] ++
             [ {errors, equals(Errors, [])}
-            , {events, check_trace(Trace)} ]))))
+            , {events, check_trace(Trace)} ]))))))
     end
-  end)).
+  end))))),
+  P.
 
 %% A EUnit wrapper for the QuickCheck property
 prop_pulse_test_() ->
-  {timeout, 1000000,
-   fun() ->
-       copy_bitcask_app(),
-       ?assert(eqc:quickcheck(eqc:testing_time(60,?QC_OUT(prop_pulse()))))
-   end}.
+    Timeout = case os:getenv("PULSE_TIME") of
+                  false -> 60;
+                  Val   -> list_to_integer(Val)
+              end,
+    ExtraTO = case os:getenv("PULSE_SHRINK_TIME") of
+                  false -> 0;
+                  Val2  -> list_to_integer(Val2)
+              end,
+    %% eqc has the irritating behavior of not asking for a license for
+    %% its entire test time at the start of the test. the following
+    %% code calulates the amount of time remaining and then reserves
+    %% the license until then, so long running tests won't fail
+    %% because the license server becomes unreachable sometime in the
+    %% middle of the test.
+    {D, {H, M0, S}} = calendar:time_difference(calendar:local_time(),
+                                                eqc:reserved_until()),
+    %% any minutes or seconds at all and we should just bump up to the
+    %% next hour
+    M =
+        case (M0 + S) of
+            0 ->
+                0;
+            _N ->
+                1
+        end,
+    HoursLeft = (D * 24) + H + M,
+    HoursAsked = trunc((Timeout + ExtraTO)/60/60),
+    case HoursLeft < HoursAsked of
+        true -> eqc:reserve({HoursAsked, hours});
+        false -> ok
+    end,
+    io:format(user, "prop_pulse_test time: ~p + ~p seconds\n",
+              [Timeout, ExtraTO]),
+    {timeout, (Timeout+ExtraTO) + 60,
+     fun() ->
+             copy_bitcask_app(),
+             ?assert(eqc:quickcheck(eqc:testing_time(Timeout,
+                                                     ?QC_OUT(prop_pulse()))))
+     end}.
 
 %% Needed since rebar fails miserably in setting up the .eunit test directory
 copy_bitcask_app() ->
@@ -377,6 +451,13 @@ check_trace(Trace) ->
       fun({call, Pid, Call}) -> [{call, Pid, Call}] end,
       fun({call, Pid, _Call}, {result, Pid, _}) -> [] end,
       Events),
+
+  Folds = eqc_temporal:stateful(
+            fun({call, Pid, {fold, _}})      -> [{folding, Pid}];
+               ({call, Pid, {fold_keys, _}}) -> [{folding, Pid}]
+            end,
+            fun({folding, Pid}, {result, Pid, _}) -> [] end,
+            Events),
 
   %% The initial value for each key is not_found.
   AllKeys = lists:usort(fold(
@@ -469,7 +550,7 @@ check_trace(Trace) ->
                           {ok, U}   -> U end,
             case lists:member(V, Vs) of
               true  -> [];                      %% V is a good result
-              false -> [{bad, {get, K, Vs, V}}] %% V is a bad result!
+              false -> [{bad, Pid, {get, K, Vs, V}}] %% V is a bad result!
             end;
         %% Check a call to fold_keys
          ({fold_keys, Pid, Vals}, {result, Pid, Keys}) ->
@@ -478,7 +559,7 @@ check_trace(Trace) ->
             %%  K not in Keys ==> not_found in Vals[K]
             case check_fold_keys_result(orddict:to_list(Vals), lists:sort(Keys)) of
               true  -> [];
-              false -> [{bad, {fold_keys, orddict:to_list(Vals), Keys}}]
+              false -> [{bad, Pid, {fold_keys, orddict:to_list(Vals), lists:sort(Keys)}}]
             end;
         %% Check a call to fold
          ({fold, Pid, Vals}, {result, Pid, KVs}) ->
@@ -487,19 +568,55 @@ check_trace(Trace) ->
             %%  K not in KVs  ==> not_found in Vals[K]
             case check_fold_result(orddict:to_list(Vals), lists:sort(KVs)) of
               true  -> [];
-              false -> [{bad, {fold, orddict:to_list(Vals), KVs}}]
+              false -> [{bad, Pid, {fold, orddict:to_list(Vals), lists:sort(KVs)}}]
             end
         end,
       eqc_temporal:union(Events, eqc_temporal:map(fun(D) -> {values, D} end, ValueDict))),
 
   %% Filter out the bad stuff from the Reads relation.
-  Bad = eqc_temporal:map(fun(X={bad, _}) -> X end, Reads),
-
+  Bad0 = eqc_temporal:map(fun(X={bad, _, _}) -> X end, Reads),
+  [{_Time1, {call, FirstPid, _}} | _] = Trace,
+  %% SLF: Any bad gets that happen during an active fold may be the result
+  %% of Bitcask snapshotting.  I'm not good enough at the temporal logic to
+  %% avoid putting 'bad' markers into Reads, but I can try to remove the
+  %% ones that we know happened during an active fold and (hope) that they
+  %% weren't truly bogus.
+  Bad1stPid = eqc_temporal:map(
+                fun({bad, Pid, _} = X) when Pid == FirstPid -> X end,
+                Bad0),
+  BadForked0 = eqc_temporal:map(
+                fun({bad, Pid, _} = X) when Pid /= FirstPid -> X end,
+           Bad0),
+  %% This is really ugly internal data structure hacking, but I'm at a loss
+  %% to do things The Right Way: is a fold happening when a forked process
+  %% sees something bad?  If yes, that's probably OK (but we can't prove it).
+  BadForked1 = mangle_temporal_relation_with_finite_time(BadForked0),
+  BadForked2 = eqc_temporal:union(BadForked1, Folds),
+  BadForkedP = lists:any(
+                 fun({_Start, _End, Xs}) ->
+                         lists:keymember(bad, 1, Xs) andalso
+                             not lists:keymember(folding, 1, Xs)
+                 end, BadForked2),
+  case eqc_temporal:is_false(Bad0) of
+      true ->
+          ok;
+      false ->
+          io:format(user, "~p Sanity check:\n", [time()]),
+          ?QC_FMT("  Bad1stPid:\n    ~p\n", [Bad1stPid]),
+          ?QC_FMT("  Folds:\n    ~p\n", [Folds]),
+          ?QC_FMT("  BadForked2:\n    ~p\n", [BadForked2]),
+          ?QC_FMT("  BadForkedP:\n    ~p\n", [BadForkedP])
+  end,
   ?WHENFAIL(begin
+    ?QC_FMT("Time: ~p ~p\n", [date(), time()]),
     ?QC_FMT("Events:\n~p\n", [Events]),
-    ?QC_FMT("Bad:\n~p\n", [Bad]) end,
-    %% There shouldn't be any Bad stuff
-    eqc_temporal:is_false(Bad)).
+    ?QC_FMT("Bad1stPid:\n~p\n", [Bad1stPid]),
+    %% ?QC_FMT("Folds:\n~p\n", [Folds]),
+    ?QC_FMT("BadForked2:\n~p\n", [BadForked2]),
+    ?QC_FMT("BadForkedP:\n~p\n", [BadForkedP]) end,
+    %% There shouldn't be any Bad stuff, for the 1st pid or forked pids
+    %%%%%%%%  eqc_temporal:is_false(Bad1stPid)).
+    eqc_temporal:is_false(Bad1stPid) andalso BadForkedP == false).
 
 check_fold_result([{K, Vs}|Expected], [{K, V}|Actual]) ->
   lists:member(V, Vs) andalso check_fold_result(Expected, Actual);
@@ -575,15 +692,25 @@ fork(Cmds) ->
   end) end).
 
 incr_clock() ->
-    bitcask_time:test__incr_fudge(1).
+    ?LOG(incr_clock,
+    bitcask_time:test__incr_fudge(1)).
+
+nice_key(K) ->
+    list_to_binary(io_lib:format("kk~2.2.0w", [K])).
+
+un_nice_key(<<"kk", Num:2/binary>>) ->
+    list_to_integer(binary_to_list(Num)).
 
 get(H, K) ->
   ?LOG({get, H, K},
-  ?CHECK_HANDLE(H, not_found, bitcask:get(H, <<K:32>>))).
+  ?CHECK_HANDLE(H, not_found, bitcask:get(H, nice_key(K)))).
+
+gets(H, {Start, End}) ->
+    [get(H, K) || K <- lists:seq(Start, End)].
 
 put(H, K, V) ->
   ?LOG({put, H, K, V},
-  ?CHECK_HANDLE(H, ok, bitcask:put(H, <<K:32>>, V))).
+  ?CHECK_HANDLE(H, ok, bitcask:put(H, nice_key(K), V))).
 
 puts(H, {K1, K2}, V) ->
   case lists:usort([ put(H, K, V) || K <- lists:seq(K1, K2) ]) of
@@ -593,33 +720,43 @@ puts(H, {K1, K2}, V) ->
 
 delete(H, K) ->
   ?LOG({delete, H, K},
-  ?CHECK_HANDLE(H, ok, bitcask:delete(H, <<K:32>>))).
+  ?CHECK_HANDLE(H, ok, bitcask:delete(H, nice_key(K)))).
 
 fork_merge(H) ->
   ?LOG({fork_merge, H},
   ?CHECK_HANDLE(H, not_needed,
-  case bitcask:needs_merge(H) of
+  case needs_merge_wrapper(H) of
     {true, Files} -> catch bitcask_merge_worker:merge(?BITCASK, [], Files);
-    false         -> not_needed
+    false         -> not_needed;
+    Else          -> Else
   end)).
 
 merge(H) ->
+  ?LOG({merge,H},
   ?CHECK_HANDLE(H, not_needed,
-  case bitcask:needs_merge(H) of
+  case needs_merge_wrapper(H) of
     {true, Files} ->
       case catch bitcask:merge(?BITCASK, [], Files) of
         {'EXIT', Err} -> Err;
         R             -> R
       end;
     false -> not_needed
-  end).
+  end)).
 
 kill(Pid) ->
   ?LOG({kill, Pid}, (catch exit(Pid, kill))).
 
 needs_merge(H) ->
   ?LOG({needs_merge, H},
-  ?CHECK_HANDLE(H, false, bitcask:needs_merge(H))).
+  ?CHECK_HANDLE(H, false, needs_merge_wrapper(H))).
+
+needs_merge_wrapper(H) ->
+    case check_no_tombstones(H, ok) of
+        ok ->
+            bitcask:needs_merge(H);
+        Else ->
+            {needs_merge_wrapper_error, Else}
+    end.
 
 join_reader(ReaderPid) ->
   receive
@@ -632,13 +769,14 @@ sync(H) ->
 
 fold(H) ->
   ?LOG({fold, H},
-  ?CHECK_HANDLE(H, [], bitcask:fold(H, fun(<<K:32>>, V, Acc) -> [{K,V}|Acc] end, []))).
+  ?CHECK_HANDLE(H, [], bitcask:fold(H, fun(Kb, V, Acc) -> [{un_nice_key(Kb),V}|Acc] end, []))).
 
 fold_keys(H) ->
   ?LOG({fold_keys, H},
-  ?CHECK_HANDLE(H, [], bitcask:fold_keys(H, fun(#bitcask_entry{key = <<K:32>>}, Ks) -> [K|Ks] end, []))).
+  ?CHECK_HANDLE(H, [], bitcask:fold_keys(H, fun(#bitcask_entry{key = Kb}, Ks) -> [un_nice_key(Kb)|Ks] end, []))).
 
 bc_open(Writer) ->
+  erlang:put(?BITCASK_TESTING_KEY, ?MODULE),
   ?LOG({open, Writer},
   case Writer of
     true  -> catch bitcask:open(?BITCASK, [read_write, {max_file_size, ?FILE_SIZE}, {open_timeout, 1234}]);
@@ -925,5 +1063,22 @@ really_delete_bitcask() ->
       timer:sleep(10),
       really_delete_bitcask()
   end.
+
+mangle_temporal_relation_with_finite_time([{_Start, infinity, []}] = X) ->
+    X;
+mangle_temporal_relation_with_finite_time([{Start, infinity, [_|_]=L}]) ->
+    [{Start, Start+1, L}, {Start+1, infinity, []}];
+mangle_temporal_relation_with_finite_time([H|T]) ->
+    [H|mangle_temporal_relation_with_finite_time(T)].
+
+check_no_tombstones(Ref, Good) ->
+    Res = bitcask:fold_keys(Ref, fun(K, Acc0) -> [K|Acc0] end,
+                            [], -1, -1, true),
+    case [X || {tombstone, _} = X <- Res] of
+        [] ->
+            Good;
+        Else ->
+            {check_no_tombstones, Else}
+    end.
 
 -endif.

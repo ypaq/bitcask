@@ -33,7 +33,11 @@
         eqc:on_output(fun(Str, Args) -> io:format(user, Str, Args) end, P)).
 -define(TEST_TIME, 30).                      % seconds
 
--record(m_fstats, {key_bytes=0, live_keys=0, live_bytes=0, total_keys=0, total_bytes=0}).
+-record(m_fstats, {key_bytes=0 :: integer(),
+                   live_keys=0 :: integer(),
+                   live_bytes=0 :: integer(),
+                   total_keys=0 :: integer(),
+                   total_bytes=0 :: integer()}).
 
 qc(P) ->
     qc(P, ?TEST_TIME).
@@ -59,8 +63,16 @@ apply_kv_ops([{put, K, V} | Rest], Ref, KVs0, Fstats0) ->
                  update_fstats(put, K ,orddict:find(K, KVs0), V, Fstats0));
 apply_kv_ops([{delete, K, _} | Rest], Ref, KVs0, Fstats0) ->
     ok = bitcask:delete(Ref, K),
-    apply_kv_ops(Rest, Ref, orddict:store(K, deleted, KVs0),
-                 update_fstats(delete, K, orddict:find(K, KVs0), ?TOMBSTONE, Fstats0));
+    case orddict:find(K, KVs0) of 
+        error -> 
+            apply_kv_ops(Rest, Ref, KVs0, Fstats0);
+        {ok, deleted} -> 
+            apply_kv_ops(Rest, Ref, KVs0, Fstats0);
+        OldVal ->
+            apply_kv_ops(Rest, Ref, orddict:store(K, deleted, KVs0),
+                         update_fstats(delete, K, OldVal,
+                                       ?TOMBSTONE, Fstats0))
+    end;
 apply_kv_ops([{itr, _K, _} | Rest], Ref, KVs, Fstats) ->
     %% Don't care about result, just want to intermix with get/put
     bitcask_nifs:keydir_itr(get_keydir(Ref), -1, -1),
@@ -75,13 +87,11 @@ apply_kv_ops([{itr_release, _K, _} | Rest], Ref, KVs, Fstats) ->
     apply_kv_ops(Rest, Ref, KVs, Fstats).
 
 
-update_fstats(delete, K, OldV, NewV, Fstats0) -> %% Delete existing key (i.e. write tombstone)
-    %% Delete issues a put with the tombstone
-    Fstats1 = update_fstats(put, K, OldV, NewV, Fstats0),
-    %% Then removes from the keydir
-    #m_fstats{key_bytes = KB, live_keys = LK, live_bytes = LB} = Fstats1,
-    TotalSz = total_sz(K, NewV), % remove the tombstone
-    Fstats1#m_fstats{key_bytes = KB - size(K),
+%% Delete existing key (i.e. write tombstone)
+update_fstats(delete, K, {ok, OldV}, _NewV, Fstats0) -> 
+    #m_fstats{key_bytes = KB, live_keys = LK, live_bytes = LB} = Fstats0,
+    TotalSz = total_sz(K, OldV),
+    Fstats0#m_fstats{key_bytes = KB - size(K),
                      live_keys = LK - 1,
                      live_bytes = LB - TotalSz};
 %% Update m_fstats record - this will be the aggregate of all files in the bitcask
@@ -130,9 +140,9 @@ check_fstats(Ref, Expect) ->
 
 check_model(Ref, Model) ->
     F = fun({K, deleted}) ->
-                ?assertEqual(not_found, bitcask:get(Ref, K));
+                ?assertEqual({K, not_found}, {K, bitcask:get(Ref, K)});
            ({K, V}) ->
-                ?assertEqual({ok, V}, bitcask:get(Ref, K))
+                ?assertEqual({K, {ok, V}}, {K, bitcask:get(Ref, K)})
         end,
     lists:map(F, Model).
 
@@ -201,7 +211,7 @@ prop_merge() ->
                      Validate = fun(Fname) ->
                                         {ok, S} = bitcask_fileops:open_file(Fname),
                                         try
-                                            ?assertEqual(true, bitcask_fileops:has_valid_hintfile(S))
+                                            ?assertEqual({Fname, true}, {Fname, bitcask_fileops:has_valid_hintfile(S)})
                                         after
                                             bitcask_fileops:close(S)
                                         end
@@ -251,7 +261,7 @@ prop_fold() ->
                          %% Verify that the bitcask contains exactly what
                          %% we expect
                          F = fun({K, deleted}) ->
-                                 ?assert(false == lists:keymember(K, 1, Actual));
+                                     ?assert(false == lists:keymember(K, 1, Actual));
                                 ({K, V}) ->
                                      ?assertEqual({K, V}, lists:keyfind(K, 1, Actual))
                              end,
@@ -262,9 +272,6 @@ prop_fold() ->
                      true
                  end)).
 
-
-prop_merge_test_() ->
-    {timeout, ?TEST_TIME*2, fun() -> qc(prop_merge()) end}.
 
 merge1_test() ->
     ?assert(eqc:check(prop_merge(),
@@ -280,13 +287,47 @@ merge3_test() ->
                          {delete,<<0>>,<<>>},
                          {delete,<<1>>,<<>>}],
                         1,1}])).
+merge4_test() ->
+    ?assert(eqc:check(prop_merge(),
+                      [{[{itr,<<1>>,<<>>},{delete,<<0>>,<<>>}],1,1}])).
+
+merge5_test() ->
+    ?assert(eqc:check(prop_merge(),
+                      [{[{put,<<"test">>,<<>>},{itr,<<"test">>,<<>>},
+                         {delete,<<"test">>,<<>>},{delete,<<"test">>,<<>>}],1,1}])).
+
+merge6_test() ->
+    ?assert(eqc:check(prop_merge(),
+                      [{[{itr,<<"test">>,<<>>},{put,<<"test">>,<<>>},
+                         {delete,<<"test">>,<<>>},{delete,<<"test">>,<<>>}],
+                        1,1}])).
+
+prop_merge_test_() ->
+    {timeout, ?TEST_TIME*2, fun() -> qc(prop_merge()) end}.
+
+
+fold1_test() ->
+    ?assert(eqc:check(prop_fold(),
+                      [{[{put,<<0>>,<<>>},
+                         {itr,<<0>>,<<>>},
+                         {delete,<<0>>,<<>>},
+                         {itr_release,<<0>>,<<>>},
+                         {put,<<0>>,<<>>}],1}])).
+
+fold2_test() ->
+    ?assert(eqc:check(prop_fold(),
+                      [{[{put,<<1>>,<<>>},
+                         {itr,<<0>>,<<0>>},
+                         {put,<<1>>,<<0>>},
+                         {itr_release,<<1>>,<<0>>},
+                         {put,<<1>>,<<>>}],1}])).
 
 prop_fold_test_() ->
     {timeout, ?TEST_TIME*2, fun() -> qc(prop_fold()) end}.
 
 
 get_keydir(Ref) ->
-    element(8, erlang:get(Ref)).    
+    element(9, erlang:get(Ref)).    
 
 -endif.
 

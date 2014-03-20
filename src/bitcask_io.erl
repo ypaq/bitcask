@@ -22,6 +22,14 @@
 -module(bitcask_io).
 -compile(export_all).
 
+-ifdef(PULSE).
+-compile({parse_transform, pulse_instrument}).
+-endif.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
+
 file_open(Filename, Opts) ->
     M = file_module(),
     M:file_open(Filename, Opts).
@@ -58,6 +66,10 @@ file_position(Ref, Position) ->
     M = file_module(),
     M:file_position(Ref, Position).
 
+file_truncate(Ref) ->
+    M = file_module(),
+    M:file_truncate(Ref).
+
 file_module() ->
     case get(bitcask_file_mod) of
         undefined ->
@@ -68,6 +80,23 @@ file_module() ->
             Mod
     end.
 
+-ifdef(TEST).
+determine_file_module() ->
+    case application:get_env(bitcask, io_mode) of
+        {ok, erlang} ->
+            bitcask_file;
+        {ok, nif} ->
+            bitcask_nifs;
+        _ ->
+            Mode = case os:getenv("BITCASK_IO_MODE") of
+                       false    -> 'erlang';
+                       "erlang" -> 'erlang';
+                       "nif"    -> 'nif'
+                    end,
+            application:set_env(bitcask, io_mode, Mode),
+            determine_file_module()
+    end.
+-else.
 determine_file_module() ->
     case application:get_env(bitcask, io_mode) of
         {ok, erlang} ->
@@ -77,3 +106,34 @@ determine_file_module() ->
         _ ->
             bitcask_file
     end.
+-endif.
+
+-ifdef(TEST).
+
+truncate_test() ->
+    Dir = "/tmp/bc.test.bitcask_io/",
+    one_truncate(filename:join(Dir, "truncate_test1.dat"), 50, 50),
+    one_truncate(filename:join(Dir, "truncate_test2.dat"), {bof, 50}, 50),
+    one_truncate(filename:join(Dir, "truncate_test3.dat"), {cur, -25}, 75),
+    one_truncate(filename:join(Dir, "truncate_test4.dat"), {eof, -75}, 25).
+
+one_truncate(Fname, Ofs, ExpectedSize) ->
+    ?assertMatch(ok, filelib:ensure_dir(Fname)),
+    file:delete(Fname),
+    Open1 = file_open(Fname, [create]),
+    ?assertMatch({ok, _}, Open1),
+    {ok, File} = Open1,
+    % Write 100 bytes
+    Bytes = <<0:100/integer-unit:8>>,
+    ?assertEqual(100, size(Bytes)),
+    ok = file_write(File, Bytes),
+    ?assertEqual({Ofs, {ok, ExpectedSize}}, {Ofs, file_position(File, Ofs)}),
+    ok = file_truncate(File),
+    ok = file_close(File),
+    % Verify size with regular file operations
+    {ok, File3} = file:open(Fname, [read, raw, binary]),
+    SizeRes = file:position(File3, {eof, 0}),
+    ok = file:close(File3),
+    ?assertEqual({ok, ExpectedSize}, SizeRes).
+
+-endif.

@@ -31,7 +31,7 @@
 -compile({parse_transform, pulse_instrument}).
 -endif.
 
--type lock_types() :: merge | write.
+-type lock_types() :: merge | write | create.
 
 %% @doc Attempt to lock the specified directory with a specific type of lock
 %% (merge or write).
@@ -137,7 +137,7 @@ delete_stale_lock(Filename) ->
                                 not_stale;
                             false ->
                                 %% The lock IS stale; delete the file.
-                                file:delete(Filename),
+                                _ = file:delete(Filename),
                                 ok
                         end;
 

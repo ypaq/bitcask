@@ -64,7 +64,7 @@ write_file(Ref) ->
 current_tstamp() ->
     case erlang:get(meck_tstamp) of
         undefined ->
-            erlang:error(uninitialized_meck_tstamp);
+            next_tstamp();                      % Set it up for us
         Value ->
             Value
     end.
@@ -90,7 +90,7 @@ prop_expiry() ->
          ?FORALL({Ops, Expiry, ExpiryGrace, Timestep, M1},
                  {eqc_gen:non_empty(list(ops(Keys, Values))),
                   choose(1,10), choose(1, 10), choose(5, 50), choose(5,128)},
-         ?IMPLIES(length(Ops) > 1,
+         ?IMPLIES(true,
                  begin
                      Dirname = "/tmp/bc.prop.expiry",
                      ?cmd("rm -rf " ++ Dirname),
@@ -115,6 +115,9 @@ prop_expiry() ->
                          %% Dump the ops into the bitcask and build a model of
                          %% what SHOULD be in the data.
                          Model = apply_kv_ops(Ops, Bref, []),
+                         %% Assist our model's calculations by incrementing
+                         %% the clock one more time.
+                         _ = next_tstamp(),
 
                          %% Close the writing file to ensure that it's included
                          %% in the needs_merge calculation
@@ -129,19 +132,26 @@ prop_expiry() ->
 %                         io:format(user, "Cutoff: ~p\nExpired: ~120p\nLive: ~120p\n",
 %                                   [ExpireCutoff, Expired, Live]),
 
+                         AllDeleteOps = lists:all(fun({delete,_,_}) -> true;
+                                                     (_)            -> false
+                                                  end, Ops),
                          %% Check that needs_merge has expected result
-                         case Expired of
-                             [] ->
+                         case {AllDeleteOps, Expired} of
+                             {true, _} ->
                                  ?assertEqual(false, bitcask:needs_merge(Bref)),
                                  true;
-                             _ ->
+                             {false, []} ->
+                                 ?assertEqual(false, bitcask:needs_merge(Bref)),
+                                 true;
+                             {false, _} ->
                                  ?assertMatch({true, _}, bitcask:needs_merge(Bref)),
                                  true
                          end
                      catch
                          X:Y ->
                              io:format(user, "exception: ~p ~p @ ~p\n",
-                                       [X,Y, erlang:get_stacktrace()])
+                                       [X,Y, erlang:get_stacktrace()]),
+                             test_exception
                      after
                          bitcask:close(Bref)
                      end

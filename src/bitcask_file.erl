@@ -23,6 +23,10 @@
 -compile(export_all).
 -behaviour(gen_server).
 
+-ifdef(PULSE).
+-compile({parse_transform, pulse_instrument}).
+-endif.
+
 %% API
 
 %% gen_server callbacks
@@ -70,6 +74,9 @@ file_position(Pid, Position) ->
 file_seekbof(Pid) ->
     file_request(Pid, file_seekbof).
 
+file_truncate(Pid) ->
+    file_request(Pid, file_truncate).
+
 %%%===================================================================
 %%% API helper functions
 %%%===================================================================
@@ -77,7 +84,18 @@ file_seekbof(Pid) ->
 file_request(Pid, Request) ->
     case check_pid(Pid) of
         ok ->
-            gen_server:call(Pid, Request, infinity);
+            try
+                gen_server:call(Pid, Request, infinity)
+            catch
+                exit:{normal,_} when Request == file_close ->
+                    %% Honest race condition in bitcask_eqc PULSE test.
+                    ok;
+                exit:{noproc,_} when Request == file_close ->
+                    %% Honest race condition in bitcask_eqc PULSE test.
+                    ok;
+                X1:X2 ->
+                    exit({file_request_error, self(), Request, X1, X2})
+            end;
         Error ->
             Error
     end.
@@ -115,7 +133,7 @@ handle_call({file_open, Owner, Filename, Opts}, _From, State) ->
                {_, true} ->
                    [read, write, exclusive, raw, binary]
            end,
-    [warn("Bitcask file option '~p' not supported~n", [Opt])
+    _ = [error_logger:warning_msg("Bitcask file option '~p' not supported~n", [Opt])
      || Opt <- [o_sync],
         proplists:get_bool(Opt, Opts)],
     case file:open(Filename, Mode) of
@@ -157,6 +175,9 @@ handle_call(file_seekbof, From, State=#state{fd=Fd}) ->
     check_owner(From, State),
     {ok, _} = file:position(Fd, bof),
     {reply, ok, State};
+handle_call(file_truncate, From, State=#state{fd=Fd}) ->
+    check_owner(From, State),
+    {reply, file:truncate(Fd), State};
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -190,6 +211,3 @@ check_owner({Pid, _Mref}, #state{owner=Owner}) ->
             throw(owner_invariant_failed),
             ok
     end.
-
-warn(Fmt, Args) ->
-    error_logger:warning_msg(Fmt, Args).

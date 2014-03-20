@@ -2,32 +2,52 @@ REPO		?= bitcask
 BITCASK_TAG	 = $(shell git describe --tags)
 REVISION	?= $(shell echo $(BITCASK_TAG) | sed -e 's/^$(REPO)-//')
 PKG_VERSION	?= $(shell echo $(REVISION) | tr - .)
+BASE_DIR         = $(shell pwd)
 REBAR_BIN := $(shell which rebar)
 ifeq ($(REBAR_BIN),)
 REBAR_BIN = ./rebar
 endif
+
+PULSE_TESTS = bitcask_pulse
 
 .PHONY: rel deps package pkgclean
 
 all: deps compile
 
 compile:
-	$(REBAR_BIN) compile 
+	$(REBAR_BIN) compile
 
 deps:
 	$(REBAR_BIN) get-deps
 
-clean: 
+clean:
 	$(REBAR_BIN) clean
 
 test: deps compile eunit_erlang eunit_nif
 
 eunit_erlang:
-	IOMODE="erlang" $(REBAR_BIN) skip_deps=true eunit
+	BITCASK_IO_MODE="erlang" $(REBAR_BIN) skip_deps=true eunit
 
 eunit_nif:
-	IOMODE="nif" $(REBAR_BIN) skip_deps=true eunit
+	BITCASK_IO_MODE="nif" $(REBAR_BIN) skip_deps=true eunit
 
+NOW	= $(shell date +%s)
+COUNTER = $(PWD)/$(NOW).current_counterexample.eqc
+EQCINFO = $(PWD)/$(NOW).eqc-info
+
+pulse:
+	@rm -rf $(BASE_DIR)/.eunit
+	BITCASK_PULSE=1 $(REBAR_BIN) clean compile
+	env BITCASK_PULSE=1 $(REBAR_BIN) -D PULSE eunit skip_deps=true suites=$(PULSE_TESTS) ; \
+	if [ $$? -ne 0 ]; then \
+		echo PULSE test FAILED; \
+		cp ./.eunit/current_counterexample.eqc $(COUNTER); \
+		cp ./.eunit/.eqc-info $(EQCINFO); \
+		echo See files $(COUNTER) and $(EQCINFO); \
+		exit 1; \
+	else \
+		exit 0; \
+	fi
 
 # Release tarball creation
 # Generates a tarball that includes all the deps sources so no checkouts are necessary
@@ -47,7 +67,7 @@ buildtar = mkdir distdir && \
 		 mkdir ../$(BITCASK_TAG)/deps && \
 		 make deps; \
 		 for dep in deps/*; do cd $${dep} && $(call archive,$${dep},../../../$(BITCASK_TAG)); cd ../..; done
-					 
+
 distdir:
 	$(if $(BITCASK_TAG), $(call buildtar), $(error "You can't generate a release tarball from a non-tagged revision. Run 'git checkout <tag>', then 'make dist'"))
 
@@ -66,15 +86,8 @@ pkgclean:
 
 export BITCASK_TAG PKG_VERSION REPO REVISION
 
-APPS = kernel stdlib sasl erts ssl tools os_mon runtime_tools crypto inets \
-	xmerl webtool snmp public_key mnesia eunit syntax_tools compiler
-PLT = $(HOME)/.bitcask_dialyzer_plt
+DIALYZER_APPS = kernel stdlib sasl erts ssl tools os_mon runtime_tools \
+				crypto inets xmerl webtool snmp public_key mnesia eunit \
+				syntax_tools compiler
 
-build_plt: deps compile
-	dialyzer --build_plt --output_plt $(PLT) --apps $(APPS) deps/*/ebin
-
-dialyzer: deps compile
-	dialyzer -Wno_return --plt $(PLT) ebin
-
-clean_plt:
-	rm $(PLT)
+include tools.mk

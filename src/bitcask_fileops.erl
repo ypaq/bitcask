@@ -23,9 +23,10 @@
 %% @doc Basic file i/o operations for bitcask.
 -module(bitcask_fileops).
 
--export([create_file/2,
+-export([create_file/3,
          open_file/1,
          close/1,
+         close_all/1,
          close_for_writing/1,
          data_file_tstamps/1,
          write/4,
@@ -38,7 +39,9 @@
          filename/1,
          hintfile_name/1,
          file_tstamp/1,
-         check_write/4]).
+         check_write/4,
+         un_write/1]).
+-export([read_file_info/1, write_file_info/2, is_file/1]).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -61,10 +64,58 @@
 
 %% @doc Open a new file for writing.
 %% Called on a Dirname, will open a fresh file in that directory.
--spec create_file(Dirname :: string(), Opts :: [any()]) -> {ok, #filestate{}}.
-create_file(DirName, Opts) ->
-    create_file_loop(DirName, [create] ++ Opts, most_recent_tstamp(DirName) + 1).
+-spec create_file(Dirname :: string(), Opts :: [any()],
+                  reference()) -> 
+                         {ok, #filestate{}}.
 
+create_file(DirName, Opts0, Keydir) ->
+    Opts = [create|Opts0],
+    {ok, Lock} = get_create_lock(DirName),
+    try 
+        {ok, Newest} = bitcask_nifs:increment_file_id(Keydir),
+        
+        Filename = mk_filename(DirName, Newest),
+        ok = ensure_dir(Filename),
+        
+        %% Check for o_sync strategy and add to opts
+        FinalOpts = 
+            case bitcask:get_opt(sync_strategy, Opts) of
+                o_sync ->
+                    [o_sync | Opts];
+                _ ->
+                    Opts
+            end,
+        
+        {ok, FD} = bitcask_io:file_open(Filename, FinalOpts),
+        HintFD = open_hint_file(Filename, FinalOpts),
+        {ok, #filestate{mode = read_write,
+                        filename = Filename,
+                        tstamp = file_tstamp(Filename),
+                        hintfd = HintFD, fd = FD, ofs = 0}}
+    catch Error:Reason ->
+            %% if we fail somehow, do we need to nuke any partial
+            %% state?
+            {Error, Reason}
+    after
+        bitcask_lockops:release(Lock)
+    end.
+        
+
+get_create_lock(DirName) ->
+    get_create_lock(DirName, 100).
+
+get_create_lock(_DirName, 0) ->
+    error(lock_failure);
+get_create_lock(DirName, N) -> 
+    timer:sleep(100-N),
+    case bitcask_lockops:acquire(create, DirName) of
+        {ok, Lock} ->
+            {ok, Lock};
+        {error, locked} ->
+            get_create_lock(DirName, N - 1)
+    end.
+   
+    
 %% @doc Open an existing file for reading.
 %% Called with fully-qualified filename.
 -spec open_file(Filename :: string()) -> {ok, #filestate{}} | {error, any()}.
@@ -73,7 +124,7 @@ open_file(Filename) ->
         {ok, FD} ->
             {ok, #filestate{mode = read_only,
                             filename = Filename, tstamp = file_tstamp(Filename),
-                            fd = FD, ofs = 0 }};
+                            fd = FD, ofs = 0}};
         {error, Reason} ->
             {error, Reason}
     end.
@@ -83,8 +134,14 @@ open_file(Filename) ->
 close(fresh) -> ok;
 close(undefined) -> ok;
 close(State = #filestate{ fd = FD }) ->
-    close_hintfile(State),
+    _ = close_hintfile(State),
     bitcask_io:file_close(FD),
+    ok.
+
+%% @doc Use when closing multiple files.  (never open for writing again)
+-spec close_all([#filestate{} | fresh | undefined]) -> ok.
+close_all(FileStates) ->
+    lists:foreach(fun ?MODULE:close/1, FileStates),
     ok.
 
 %% @doc Close a file for writing, but leave it open for reads.
@@ -103,27 +160,38 @@ close_hintfile(State = #filestate { hintfd = HintFd, hintcrc = HintCRC }) ->
     %% timestamp and offset as large as the file format supports so opening with
     %% an older version of bitcask will just reject the record at the end of the
     %% hintfile and otherwise work normally.
-    Iolist = hintfile_entry(<<>>, 0, {?MAXOFFSET, HintCRC}),
+    Iolist = hintfile_entry(<<>>, 0, 0, ?MAXOFFSET_V2, HintCRC),
     ok = bitcask_io:file_write(HintFd, Iolist),
     bitcask_io:file_sync(HintFd),
     bitcask_io:file_close(HintFd),
     State#filestate { hintfd = undefined, hintcrc = 0 }.
 
-
 %% Build a list of {tstamp, filename} for all files in the directory that
 %% match our regex. 
 -spec data_file_tstamps(Dirname :: string()) -> [{integer(), string()}].
 data_file_tstamps(Dirname) ->
-    filelib:fold_files(Dirname, "^[0-9]+.bitcask.data$", false,
-                       fun(F, Acc) ->
-                               [{file_tstamp(F), F} | Acc]
-                       end, []).
-
+    case list_dir(Dirname) of
+        {ok, Files} ->
+            lists:foldl(
+              fun(Filename, Acc) ->
+                      case string:tokens(Filename, ".") of
+                          [TSString, _, "data"] ->
+                              [{list_to_integer(TSString), 
+                                filename:join(Dirname, Filename)}
+                                | Acc];
+                          _ ->
+                              Acc
+                      end
+              end,
+              [], Files);
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 %% @doc Use only after merging, to permanently delete a data file.
 -spec delete(#filestate{}) -> ok | {error, atom()}.
 delete(#filestate{ filename = FN } = State) ->
-    file:delete(FN),
+    _ = file:delete(FN),
     case has_hintfile(State) of
         true ->
             file:delete(hintfile_name(State));
@@ -154,14 +222,33 @@ write(Filestate=#filestate{fd = FD, hintfd = HintFD,
     ok = bitcask_io:file_pwrite(FD, Offset, Bytes),
     %% Create and store the corresponding hint entry
     TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
-    Iolist = hintfile_entry(Key, Tstamp, {Offset, TotalSz}),
+    TombInt = case bitcask:is_tombstone(Value) of
+                  true  -> 1;
+                  false -> 0
+              end,
+    Iolist = hintfile_entry(Key, Tstamp, TombInt, Offset, TotalSz),
     ok = bitcask_io:file_write(HintFD, Iolist),
     %% Record our final offset
     TotalSz = iolist_size(Bytes),
     HintCRC = erlang:crc32(HintCRC0, Iolist), % compute crc of hint
     {ok, Filestate#filestate{ofs = Offset + TotalSz,
-                            hintcrc = HintCRC}, Offset, TotalSz}.
+                             hintcrc = HintCRC,
+                             l_ofs = Offset,
+                             l_hbytes = iolist_size(Iolist),
+                             l_hintcrc = HintCRC0}, Offset, TotalSz}.
 
+%% WARNING: We can only undo the last write.
+un_write(Filestate=#filestate{fd = FD, hintfd = HintFD, 
+                              l_ofs = LastOffset,
+                              l_hbytes = LastHintBytes,
+                              l_hintcrc = LastHintCRC}) ->
+    {ok, _O2} = bitcask_io:file_position(FD, LastOffset),
+    ok = bitcask_io:file_truncate(FD),
+    {ok, 0} = bitcask_io:file_position(FD, 0),
+    {ok, _HO2} = bitcask_io:file_position(HintFD, {cur, -LastHintBytes}),
+    ok = bitcask_io:file_truncate(HintFD),
+    {ok, Filestate#filestate{ofs = LastOffset,
+                             hintcrc = LastHintCRC}}.
 
 %% @doc Given an Offset and Size, get the corresponding k/v from Filename.
 -spec read(Filename :: string() | #filestate{}, Offset :: integer(),
@@ -210,58 +297,56 @@ fold(fresh, _Fun, Acc) -> Acc;
 fold(#filestate { fd=Fd, filename=Filename, tstamp=FTStamp }, Fun, Acc0) ->
     %% TODO: Add some sort of check that this is a read-only file
     ok = bitcask_io:file_seekbof(Fd),
-    case fold_file_loop(Fd, fun fold_int_loop/6, Fun, Acc0, 
+    case fold_file_loop(Fd, fun fold_int_loop/6, Fun, Acc0,
                         {Filename, FTStamp, 0, 0}) of
         {error, Reason} ->
             {error, Reason};
         Acc -> Acc
     end.
 
--spec fold_keys(fresh | #filestate{}, fun((binary(), integer(), {integer(), integer()}, any()) -> any()), any()) ->
+-type key_fold_fun() :: fun((binary(), integer(), {integer(), integer()}, any()) -> any()).
+-type key_fold_mode() :: datafile | hintfile | default | recovery.
+-spec fold_keys(fresh | #filestate{}, key_fold_fun(), any()) ->
         any() | {error, any()}.
 fold_keys(fresh, _Fun, Acc) -> Acc;
 fold_keys(State, Fun, Acc) ->
     fold_keys(State, Fun, Acc, default).
 
--spec fold_keys(fresh | #filestate{}, fun((binary(), integer(), {integer(), integer()}, any()) -> any()), any(), datafile | hintfile | default | recovery) ->
+-spec fold_keys(fresh | #filestate{}, key_fold_fun(), any(), key_fold_mode()) ->
         any() | {error, any()}.
-fold_keys(#filestate { fd = Fd } = State, Fun, Acc, Mode) ->
-    case Mode of
-        datafile ->
-            fold_keys_loop(Fd, 0, Fun, Acc);
-        hintfile ->
-            fold_hintfile(State, Fun, Acc);
-        default ->
-            case has_hintfile(State) of
-                true ->
-                    fold_hintfile(State, Fun, Acc);
-                false ->
-                    fold_keys_loop(Fd, 0, Fun, Acc)
-            end;
-        recovery -> % if hint files are corrupt, restart scanning cask files
-                    % Fun should be side-effect free or tolerant of being
-                    % called twice
-            case has_valid_hintfile(State) of
-                true ->
-                    case fold_hintfile(State, Fun, Acc) of
-                        {error, {trunc_hintfile, Acc0}} ->
-                            Acc0;
-                        {error, Reason} ->
-                            HintFile = hintfile_name(State),
-                            error_logger:error_msg("Hintfile '~s' failed fold: ~p\n",
-                                                   [HintFile, Reason]),
-                            fold_keys_loop(Fd, 0, Fun, Acc);
-                        Acc1 ->
-                            Acc1
-                    end;
-                false ->
-                    HintFile = hintfile_name(State),
-                    error_logger:error_msg("Hintfile '~s' invalid\n",
-                                           [HintFile]),
+fold_keys(#filestate { fd = Fd } = _State, Fun, Acc, datafile) ->
+    fold_keys_loop(Fd, 0, Fun, Acc);
+fold_keys(#filestate { fd = _Fd } = State, Fun, Acc, hintfile) ->
+    fold_hintfile(State, Fun, Acc);
+fold_keys(State, Fun, Acc, Mode) ->
+    fold_keys(State, Fun, Acc, Mode, has_hintfile(State)).
 
-                    fold_keys_loop(Fd, 0, Fun, Acc)
-            end
-    end.
+fold_keys(State, Fun, Acc, default, true) ->
+    fold_hintfile(State, Fun, Acc);
+fold_keys(#filestate{fd = Fd}, Fun, Acc, default, false) ->
+    fold_keys_loop(Fd, 0, Fun, Acc);
+fold_keys(State, Fun, Acc, recovery, true) ->
+    fold_keys(State, Fun, Acc, recovery, true, has_valid_hintfile(State));
+fold_keys(#filestate{fd = Fd}, Fun, Acc, recovery, false) ->
+            fold_keys_loop(Fd, 0, Fun, Acc).
+
+fold_keys(#filestate{fd=Fd}=State, Fun, Acc, recovery, _, true) ->
+    case fold_hintfile(State, Fun, Acc) of
+        {error, {trunc_hintfile, Acc0}} ->
+            Acc0;
+        {error, Reason} ->
+            HintFile = hintfile_name(State),
+            error_logger:error_msg("Hintfile '~s' failed fold: ~p\n",
+                                   [HintFile, Reason]),
+            fold_keys_loop(Fd, 0, Fun, Acc);
+        Acc1 ->
+            Acc1
+    end;
+fold_keys(#filestate{fd=Fd}=State, Fun, Acc, recovery, _, false) ->
+    HintFile = hintfile_name(State),
+    error_logger:error_msg("Hintfile '~s' invalid\n",
+                           [HintFile]),
+    fold_keys_loop(Fd, 0, Fun, Acc).
 
 -spec mk_filename(string(), integer()) -> string().
 mk_filename(Dirname, Tstamp) ->
@@ -284,13 +369,17 @@ file_tstamp(#filestate{tstamp=Tstamp}) ->
 file_tstamp(Filename) when is_list(Filename) ->
     list_to_integer(filename:basename(Filename, ".bitcask.data")).
 
--spec check_write(fresh | #filestate{}, binary(), binary(), integer()) ->
+-spec check_write(fresh | #filestate{}, binary(), binary()|tombstone, integer()) ->
       fresh | wrap | ok.
 check_write(fresh, _Key, _Value, _MaxSize) ->
     %% for the very first write, special-case
     fresh;
 check_write(#filestate { ofs = Offset }, Key, Value, MaxSize) ->
-    Size = ?HEADER_SIZE + size(Key) + size(Value),
+    ValSize = case Value of
+                  tombstone -> ?TOMBSTONE_SIZE;
+                  _ -> size(Value)
+              end,
+    Size = ?HEADER_SIZE + size(Key) + ValSize,
     case (Offset + Size) > MaxSize of
         true ->
             wrap;
@@ -299,23 +388,19 @@ check_write(#filestate { ofs = Offset }, Key, Value, MaxSize) ->
     end.
 
 has_hintfile(#filestate { filename = Fname }) ->
-    filelib:is_file(hintfile_name(Fname)).
+    is_file(hintfile_name(Fname)).
 
 %% Return true if there is a hintfile and it has
 %% a valid CRC check
 has_valid_hintfile(State) ->
-    case has_hintfile(State) of
-        true ->
-            HintFile = hintfile_name(State),
-            case bitcask_io:file_open(HintFile, [readonly, read_ahead]) of
-                {ok, HintFd} -> 
-                    {ok, HintI} = file:read_file_info(HintFile),
-                    HintSize = HintI#file_info.size,
-                    hintfile_validate_loop(HintFd, 0, HintSize);
-                _ ->
-                    false
-            end;
-        Else -> Else
+    HintFile = hintfile_name(State),
+    case bitcask_io:file_open(HintFile, [readonly, read_ahead]) of
+        {ok, HintFd} ->
+            {ok, HintI} = read_file_info(HintFile),
+            HintSize = HintI#file_info.size,
+            hintfile_validate_loop(HintFd, 0, HintSize);
+        _ ->
+            false
     end.
 
 hintfile_validate_loop(Fd, CRC0, Rem) ->
@@ -354,7 +439,8 @@ read_crc(Fd) ->
         {ok, <<0:?TSTAMPFIELD, 
                0:?KEYSIZEFIELD,
                ExpectCRC:?TOTALSIZEFIELD, 
-               (?MAXOFFSET):?OFFSETFIELD>>} ->
+               _TombInt:?TOMBSTONEFIELD_V2,
+               (?MAXOFFSET_V2):?OFFSETFIELD_V2>>} ->
             ExpectCRC;
         _ -> error
     end.
@@ -414,7 +500,7 @@ fold_keys_loop(Fd, Offset, Fun, Acc0) ->
 
 fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, 
                      KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD, 
-                     Key:KeySz/bytes, _:ValueSz/bytes,
+                     Key:KeySz/bytes, Value:ValueSz/bytes,
                      Rest/binary>>, 
                    Fun, Acc0, Consumed0, 
                    {Offset, AvgValSz0}, 
@@ -423,18 +509,23 @@ fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD,
     PosInfo = {Offset, TotalSz},
     Consumed = Consumed0 + TotalSz,
     AvgValSz = (AvgValSz0 + ValueSz) div 2,
-    Acc = Fun(Key, Tstamp, PosInfo, Acc0),
+    KeyPlus = case bitcask:is_tombstone(Value) of
+                  true  -> {tombstone, Key};
+                  false -> Key
+              end,
+    Acc = Fun(KeyPlus, Tstamp, PosInfo, Acc0),
     fold_keys_int_loop(Rest, Fun, Acc, Consumed, 
                        {Offset + TotalSz, AvgValSz}, EOI);
-%% in the case where values are very large, we don't actually want to 
+%% in the case where values are very large, we don't actually want to
 %% get a larger binary if we don't have to, so just issue a skip.
-fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD, 
-                     KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD, 
-                     Key:KeySz/bytes, 
-                     _Rest/binary>>, 
-                   Fun, Acc0, _Consumed0, 
-                   {Offset, AvgValSz0}, 
-                   _EOI) when AvgValSz0 > ?CHUNK_SIZE ->
+fold_keys_int_loop(<<_Crc32:?CRCSIZEFIELD, Tstamp:?TSTAMPFIELD,
+                     KeySz:?KEYSIZEFIELD, ValueSz:?VALSIZEFIELD,
+                     Key:KeySz/bytes,
+                     _Rest/binary>>,
+                   Fun, Acc0, _Consumed0,
+                   {Offset, AvgValSz0},
+                   _EOI) when ValueSz > ?MAX_TOMBSTONE_SIZE,
+                              AvgValSz0 > ?CHUNK_SIZE ->
     TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
     PosInfo = {Offset, TotalSz},
     Acc = Fun(Key, Tstamp, PosInfo, Acc0),
@@ -455,7 +546,7 @@ fold_hintfile(State, Fun, Acc0) ->
     case bitcask_io:file_open(HintFile, [readonly, read_ahead]) of
         {ok, HintFd} ->
             try
-                {ok, DataI} = file:read_file_info(State#filestate.filename),
+                {ok, DataI} = read_file_info(State#filestate.filename),
                 DataSize = DataI#file_info.size,
                 case fold_file_loop(HintFd, fun fold_hintfile_loop/6, Fun, Acc0, 
                                     {DataSize, HintFile}) of 
@@ -475,21 +566,26 @@ fold_hintfile(State, Fun, Acc0) ->
 %% hint record, three-tuple done indicates that we've exhausted all bytes, or
 %% it's an error
 fold_hintfile_loop(<<0:?TSTAMPFIELD, 0:?KEYSIZEFIELD,
-                     _ExpectCRC:?TOTALSIZEFIELD, (?MAXOFFSET):?OFFSETFIELD>>,
+                     _ExpectCRC:?TOTALSIZEFIELD,
+                     _TombInt:?TOMBSTONEFIELD_V2, (?MAXOFFSET_V2):?OFFSETFIELD_V2>>,
                    _Fun, Acc, Consumed, _Args, EOI) when EOI =:= true ->
     {done, Acc, Consumed + ?HINT_RECORD_SZ};
 %% main work loop here, containing the full match of hint record and key.
 %% if it gets a match, it proceeds to recurse over the rest of the big
 %% binary
 fold_hintfile_loop(<<Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD,
-                     TotalSz:?TOTALSIZEFIELD, Offset:?OFFSETFIELD,
+                     TotalSz:?TOTALSIZEFIELD,
+                     TombInt:?TOMBSTONEFIELD_V2, Offset:?OFFSETFIELD_V2,
                      Key:KeySz/bytes, Rest/binary>>, 
                    Fun, Acc0, Consumed0, {DataSize, HintFile} = Args,
                    EOI) ->
     case Offset + TotalSz =< DataSize + 1 of 
         true ->
             PosInfo = {Offset, TotalSz},
-            Acc = Fun(Key, Tstamp, PosInfo, Acc0),
+            KeyPlus = if TombInt == 1 -> {tombstone, Key};
+                         true         -> Key
+                      end,
+            Acc = Fun(KeyPlus, Tstamp, PosInfo, Acc0),
             Consumed = KeySz + ?HINT_RECORD_SZ + Consumed0,
             fold_hintfile_loop(Rest, Fun, Acc, 
                                Consumed, Args, EOI);
@@ -611,48 +707,107 @@ fold_file_loop(Fd, FoldFn, IntFoldFn, Acc0, Args0, Prev0, ChunkSz0) ->
             {error, Reason}
     end.
 
-create_file_loop(DirName, Opts, Tstamp) ->
-    Filename = mk_filename(DirName, Tstamp),
-    ok = filelib:ensure_dir(Filename),
-
-    %% Check for o_sync strategy and add to opts
-    FinalOpts = case bitcask:get_opt(sync_strategy, Opts) of
-                    o_sync ->
-                        [o_sync | Opts];
-                    _ ->
-                        Opts
-                end,
-
-    case bitcask_io:file_open(Filename, FinalOpts) of
+open_hint_file(Filename, FinalOpts) ->
+    open_hint_file(Filename, FinalOpts, 10).
+    
+open_hint_file(_Filename, _FinalOpts, 0) ->
+    throw(couldnt_open_hintfile);
+open_hint_file(Filename, FinalOpts, Count) ->
+    case bitcask_io:file_open(hintfile_name(Filename), FinalOpts) of 
         {ok, FD} ->
-            {ok, HintFD} = bitcask_io:file_open(hintfile_name(Filename), FinalOpts),
-            {ok, #filestate{mode = read_write,
-                            filename = Filename,
-                            tstamp = file_tstamp(Filename),
-                            hintfd = HintFD, fd = FD, ofs = 0}};
-
-        {error, _} ->
-            %% Couldn't create a new file with the requested name,
-            %% check for the more recent timestamp and increment by
-            %% 1 and try again.
-            %% This introduces some drift into the actual creation
-            %% time, but given that we only have at most 2 writers
-            %% (writer + merger) for a given bitcask, it shouldn't be
-            %% more than a few seconds. The alternative it to sleep
-            %% until the next second rolls around -- but this
-            %% introduces lengthy, unnecessary delays.
-            %% This also handles the possibility of clock skew
-            MostRecentTS = most_recent_tstamp(DirName),
-            create_file_loop(DirName, Opts, MostRecentTS + 1)
+            FD;
+        {error, eexist} -> 
+            timer:sleep(50),
+            open_hint_file(Filename, FinalOpts, Count - 1)
     end.
 
-hintfile_entry(Key, Tstamp, {Offset, TotalSz}) ->
+hintfile_entry(Key, Tstamp, TombInt, Offset, TotalSz) ->
     KeySz = size(Key),
-    [<<Tstamp:?TSTAMPFIELD>>, <<KeySz:?KEYSIZEFIELD>>,
-     <<TotalSz:?TOTALSIZEFIELD>>, <<Offset:?OFFSETFIELD>>, Key].
+    [<<Tstamp:?TSTAMPFIELD, KeySz:?KEYSIZEFIELD, TotalSz:?TOTALSIZEFIELD,
+       TombInt:?TOMBSTONEFIELD_V2, Offset:?OFFSETFIELD_V2>>, Key].
 
-%% Find the most recent timestamp for a .data file
-most_recent_tstamp(DirName) ->
-    lists:foldl(fun({TS,_},Acc) -> 
-                       erlang:max(TS, Acc)
-               end, 0, data_file_tstamps(DirName)).
+%% ===================================================================
+%% file/filelib avoidance code.
+%% ===================================================================
+
+read_file_info(FileName) ->
+    prim_file:read_file_info(FileName).
+
+write_file_info(FileName, Info) ->
+    prim_file:write_file_info(FileName, Info).
+
+is_file(File) ->
+    case read_file_info(File) of
+        {ok, #file_info{type=regular}} ->
+            true;
+        {ok, #file_info{type=directory}} ->
+            true;
+        _ ->
+            false
+    end.
+
+is_dir(File) ->
+    case read_file_info(File) of
+        {ok, #file_info{type=directory}} ->
+            true;
+        _ ->
+            false
+    end.
+
+ensure_dir("/") ->
+    ok;
+ensure_dir(F) ->
+    Dir = filename:dirname(F),
+    case is_dir(Dir) of
+        true ->
+            ok;
+        false when Dir =:= F ->
+            %% Protect against infinite loop
+            {error,einval};
+        false ->
+            _ = ensure_dir(Dir),
+            %% this is rare enough that the serialization 
+            %% isn't super important, maybe
+            case file:make_dir(Dir) of
+                {error,eexist}=EExist ->
+                    case is_dir(Dir) of
+                        true ->
+                            ok;
+                        false ->
+                            EExist
+                    end;
+                Err ->
+                    Err
+            end
+    end.
+
+list_dir(Directory) ->
+    Port = get_efile_port(),
+    prim_file:list_dir(Port, Directory).
+
+get_efile_port() ->
+    Key = bitcask_efile_port,
+    case get(Key) of
+        undefined ->
+            case prim_file_drv_open("efile", [binary]) of
+                {ok, Port} ->
+                    put(Key, Port),
+                    get_efile_port();
+                Err ->
+                    error_logger:error_msg("get_efile_port: ~p\n", [Err]),
+                    timer:sleep(1000),
+                    get_efile_port()
+            end;
+        Port ->
+            Port
+    end.
+
+prim_file_drv_open(Driver, Portopts) ->
+    try erlang:open_port({spawn, Driver}, Portopts) of
+        Port ->
+            {ok, Port}
+    catch
+        error:Reason ->
+            {error, Reason}
+    end.
+
