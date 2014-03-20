@@ -1003,7 +1003,7 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
             %%    files that we need.
             Lock = poll_for_merge_lock(Dirname),
             try
-                poll_deferred_delete_queue_empty(),
+                poll_deferred_delete_queue_empty(Dirname),
                 if ReadWriteModeP ->
                         %% This purge will acquire the write lock
                         %% prior to doing anything.
@@ -1524,10 +1524,10 @@ poll_for_merge_lock(Dirname, N) ->
             poll_for_merge_lock(Dirname, N-1)
     end.
 
-poll_deferred_delete_queue_empty() ->
-    case bitcask_merge_delete:queue_length() of
+poll_deferred_delete_queue_empty(Dirname) ->
+    case bitcask_merge_delete:queue_length(Dirname) of
         0 -> ok;
-        _ -> receive after 1100 -> poll_deferred_delete_queue_empty() end
+        _ -> receive after 1100 -> poll_deferred_delete_queue_empty(Dirname) end
     end.
 
 %% Internal merge function for cache_merge functionality.
@@ -1989,21 +1989,21 @@ expire_test() ->
 expire_merge_test() ->
     %% Initialize dataset with max_file_size set to 1 so that each file will
     %% only contain a single key.
-    close(init_dataset("/tmp/bc.test.mergeexpire", [{max_file_size, 1}],
+    Dir = "/tmp/bc.test.mergeexpire",
+    close(init_dataset(Dir, [{max_file_size, 1}],
                        default_dataset())),
 
     %% Wait for it all to expire
     timer:sleep(2000),
-
     %% Merge everything
-    ok = merge("/tmp/bc.test.mergeexpire",[{expiry_secs,1}]),
+    ok = merge(Dir,[{expiry_secs,1}]),
 
     %% With lazy merge file creation there will be no files.
-    ok = bitcask_merge_delete:testonly__delete_trigger(),
-    0 = length(readable_files("/tmp/bc.test.mergeexpire")),
+    ok = bitcask_merge_delete:testonly__delete_trigger(Dir),
+    0 = length(readable_files(Dir)),
 
     %% Make sure all the data is present
-    B = bitcask:open("/tmp/bc.test.mergeexpire"),
+    B = bitcask:open(Dir),
 
     %% It's gone!
     true = ([] =:= bitcask:list_keys(B)),
@@ -2304,7 +2304,7 @@ truncated_merge_test() ->
     ok = corrupt_file(Data5, 15, <<"!">>),
     %% Merge everything
     ok = merge(Dir),
-    ok = bitcask_merge_delete:testonly__delete_trigger(),
+    ok = bitcask_merge_delete:testonly__delete_trigger(Dir),
 
     timer:sleep(900),
 

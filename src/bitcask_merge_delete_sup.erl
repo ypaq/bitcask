@@ -19,7 +19,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(bitcask_sup).
+-module(bitcask_merge_delete_sup).
 
 -behaviour(supervisor).
 
@@ -47,7 +47,4 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-    {ok, {{rest_for_one, 5, 10}, [?CHILD(bitcask_merge_delete_sup, supervisor),
-                                  ?CHILD(bitcask_merge_delete, worker),
-                                  ?CHILD(bitcask_merge_worker, worker)
-                                 ]}}.
+    {ok, {{one_for_one, 5, 10}, [ ]}}.

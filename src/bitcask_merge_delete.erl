@@ -28,8 +28,8 @@
 -endif.
 
 %% API
--export([start_link/0, defer_delete/3, queue_length/0]).
--export([testonly__delete_trigger/0]).                      % testing only
+-export([start_link/0, start_link/1, defer_delete/3, queue_length/1]).
+-export([testonly__delete_trigger/1]).                      % testing only
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -44,43 +44,94 @@
 -define(SERVER, ?MODULE). 
 -define(TIMEOUT, 1000).
 
--record(state, {q :: queue()}).
+-record(state, {
+          map :: undefined | dict(),            % routing proc
+          dir :: undefined | string(),          % per-instance proc
+          q   :: undefined | queue()            % per-instance proc
+         }).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
+%% There's a bit of module abuse here, but we're reusing most of this
+%% code, and it seems fine to me.
+%% * 1 proc, registered with the ?SERVER name: man-in-the-middle router
+%%           creates real worker procs and puts them under the new
+%%           bitcask_merge_delete_sup supervisor.
+%%           Communicate via gen_server:call().
+%%           *NEVER* replies directly to a caller.
+%% * N procs, no registered name, all workers that are responsible for
+%%            managing files for a single keydir.
+%%            *ALWAYS* reply to the caller with gen_server:reply().
+
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+start_link(Dirname) ->
+    gen_server:start_link(?MODULE, [Dirname], []).
+
+new_worker(Dirname) ->
+    supervisor:start_child(bitcask_merge_delete_sup,
+                           {Dirname, {?MODULE, start_link, [Dirname]},
+                            temporary, 5000, worker, [?MODULE]}).
 
 defer_delete(Dirname, IterGeneration, Files) ->
     gen_server:call(?SERVER, {defer_delete, Dirname, IterGeneration, Files},
                     infinity).
 
-queue_length() ->
-    gen_server:call(?SERVER, {queue_length}, infinity).
+defer_delete(Server, Dirname, IterGeneration, Files, From) ->
+    gen_server:cast(Server, {defer_delete, Dirname, IterGeneration, Files, From}).
 
-testonly__delete_trigger() ->
-    gen_server:call(?SERVER, {testonly__delete_trigger}, infinity).
+queue_length(Dirname) ->
+    gen_server:call(?SERVER, {queue_length, Dirname}, infinity).
+
+queue_length(Server, Dirname, From) ->
+    gen_server:cast(Server, {queue_length, Dirname, From}).
+
+testonly__delete_trigger(Dirname) ->
+    gen_server:call(?SERVER, {testonly__delete_trigger, Dirname}, infinity).
+
+testonly__delete_trigger(Server, Dirname, From) ->
+    gen_server:cast(Server, {testonly__delete_trigger, Dirname, From}).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
 init([]) ->
-    {ok, #state{q = queue:new()}, ?TIMEOUT}.
+    {ok, #state{map = dict:new()}};
+init([Dirname]) ->
+    {ok, #state{dir = Dirname, q = queue:new()}, ?TIMEOUT}.
 
-handle_call({defer_delete, Dirname, IterGeneration, Files}, _From, State) ->
-    {reply, ok, State#state{q = queue:in({Dirname, IterGeneration, Files},
-                                         State#state.q)}, ?TIMEOUT};
-handle_call({queue_length}, _From, State) ->
-    {reply, queue:len(State#state.q), State, ?TIMEOUT};
-handle_call({testonly__delete_trigger}, _From, State) ->
-    {reply, ok, check_status(State), ?TIMEOUT};
+handle_call({defer_delete, Dirname, IterGeneration, Files}, From, State) ->
+    {Pid, State2} = find_or_start_server(Dirname, State),
+    _ = defer_delete(Pid, Dirname, IterGeneration, Files, From),
+    {noreply, State2};
+handle_call({queue_length, Dirname}, From, State) ->
+    {Pid, State2} = find_or_start_server(Dirname, State),
+    _ = queue_length(Pid, Dirname, From),
+    {noreply, State2};
+handle_call({testonly__delete_trigger, Dirname}, From, State) ->
+    {Pid, State2} = find_or_start_server(Dirname, State),
+    _ = testonly__delete_trigger(Pid, Dirname, From),
+    {noreply, State2};
 handle_call(_Request, _From, State) ->
     Reply = unknown_request,
-    {reply, Reply, State, ?TIMEOUT}.
+    {reply, Reply, State}.
 
+handle_cast({defer_delete, Dirname, IterGeneration, Files, From}, State) ->
+    gen_server:reply(From, ok),
+    {noreply, State#state{q = queue:in({Dirname, IterGeneration, Files},
+                                       State#state.q)}, ?TIMEOUT};
+handle_cast({queue_length, _Dirname, From}, State) ->
+    gen_server:reply(From, queue:len(State#state.q)),
+    {noreply, State, ?TIMEOUT};
+handle_cast({testonly__delete_trigger, _Dirname, From}, State) ->
+    %% Implicit sync semantics: run check_status() before replying
+    State2 = check_status(State),
+    gen_server:reply(From, ok),
+    {noreply, State2, ?TIMEOUT};
 handle_cast(_Msg, State) ->
     {noreply, State, ?TIMEOUT}.
 
@@ -98,6 +149,15 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+find_or_start_server(Dirname, State = #state{map = Map}) ->
+    case dict:find(Dirname, Map) of
+        {ok, Pid} ->
+            {Pid, State};
+        error ->
+            {ok, Pid} = new_worker(Dirname),
+            {Pid, State#state{map = dict:store(Dirname, Pid, Map)}}
+    end.
 
 check_status(S) ->
     case queue:out(S#state.q) of
@@ -175,7 +235,7 @@ multiple_merges_during_fold_body() ->
     
     SlowPid ! go_ahead,
     timer:sleep(500),
-    ok = ?MODULE:testonly__delete_trigger(),
+    ok = ?MODULE:testonly__delete_trigger(Dir),
     0 = CountSetuids(),
     
     ok.
