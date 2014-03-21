@@ -704,19 +704,29 @@ keydir_itr_many_out_of_date_test() ->
                               after 500 -> {timeout, Pid}
                               end || Pid <- Pids]), [ok]).
 
+keydir_itr_many_update_test_() ->
+    {timeout, 300, fun keydir_itr_many_update_test/0}.
+    
 keydir_itr_many_update_test() ->
-    Name = "keydir_itr_many_update_test",
+    [keydir_itr_many_update(N) || N <- lists:seq(1,100000)].
+
+keydir_itr_many_update(N) when is_integer(N) ->
+    keydir_itr_many_update(integer_to_list(N));
+keydir_itr_many_update(N) ->
+    Name = "keydir_itr_many_update_test" ++ N,
     {not_ready, Ref1} = bitcask_nifs:keydir_new(Name),
     bitcask_nifs:keydir_mark_ready(Ref1),
-    ok = bitcask_nifs:keydir_itr_int(Ref1, 1000000, 0, 0),
-    ok = keydir_put(Ref1, <<"key">>, 1, 2, 3, 4, bitcask_time:tstamp()),
+    ?assertMatch(ok , bitcask_nifs:keydir_itr_int(Ref1, 1000000, 0, 0)),
+    ?assertMatch(ok , keydir_put(Ref1, <<"key">>, 1, 2, 3, 4, bitcask_time:tstamp())),
+    {_, _, _, {_, _, Frozen, _}} = bitcask_nifs:keydir_info(Ref1),
+    ?assertEqual(true, Frozen),
     Me = self(),
     F = fun() ->
                 {ready, Ref2} = bitcask_nifs:keydir_new(Name),
                 Me ! {ready, self()},
                 %% one update since created
-                out_of_date = bitcask_nifs:keydir_itr_int(Ref2, 1000000,
-                                                          0, 0),
+                ?assertMatch(out_of_date , bitcask_nifs:keydir_itr_int(Ref2, 1000001,
+                                                          0, 0)),
                 receive
                     ready ->
                         Me ! {done, self()}

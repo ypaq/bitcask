@@ -1699,6 +1699,10 @@ static int can_itr_keydir(bitcask_keydir* keydir, uint32_t ts, int maxage, int m
         (maxage < 0 && maxputs < 0)) // the exiting freeze
     {
         DEBUG2("LINE %d can_itr\r\n", __LINE__);
+        if ( ts == 1000001 ) {
+            fprintf(stderr, "fucking yeah iterating 'cause not frozen %d %d %d\n",
+                    keydir->pending == NULL, maxage, maxputs);
+        }
         return 1;
     }
     else if (ts == 0 || ts < keydir->pending_start_time)
@@ -1710,8 +1714,17 @@ static int can_itr_keydir(bitcask_keydir* keydir, uint32_t ts, int maxage, int m
     {
         DEBUG2("LINE %d can_itr\r\n", __LINE__);
         uint64_t age = ts - keydir->pending_start_time;
-        return ((maxage < 0 || age <= maxage) &&
-                (maxputs < 0 || keydir->pending_updated <= maxputs));
+        if ((maxage < 0 || age <= maxage) &&
+                (maxputs < 0 || keydir->pending_updated <= maxputs))
+        {
+            fprintf(stderr, "Can iterate with age %llu, pending update %llu\n",
+                    age, keydir->pending_updated);
+            return 1;
+        }
+        else
+        {
+            return 0;
+        }
     }
 }
 
@@ -1877,6 +1890,7 @@ void itr_release_internal(ErlNifEnv* env, bitcask_keydir_handle* handle)
     if (handle->keydir->keyfolders == 0 && handle->keydir->pending != NULL)
     {
         DEBUG2("LINE %d itr_release\r\n", __LINE__);
+        fprintf(stderr, "Merge pending entries\n");
         merge_pending_entries(env, handle->keydir);
         handle->keydir->iter_generation++;
     }
