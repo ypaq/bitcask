@@ -914,11 +914,11 @@ put_state(Ref, State) ->
 kt_id(Key) ->
     Key.
 
-scan_key_files([], _KeyDir, Acc, _CloseFile, _EnoentOK, _KT) ->
+scan_key_files([], _KeyDir, Acc, _CloseFile, _KT) ->
     Acc;
-scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile, 
-               EnoentOK, KT) ->
-    %% Restrictive pattern matching below is intentional
+scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile, KT) ->
+    %% Restrictive pattern matching below is intentional, we want to
+    %% throw an error on enoent
     case bitcask_fileops:open_file(Filename) of
         {ok, File} ->
             FileTstamp = bitcask_fileops:file_tstamp(File),
@@ -946,10 +946,7 @@ scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile,
                true ->
                     ok
             end,
-            scan_key_files(Rest, KeyDir, [File | Acc], CloseFile, 
-                           EnoentOK, KT);
-        {error, enoent} when EnoentOK ->
-            scan_key_files(Rest, KeyDir, Acc, CloseFile, EnoentOK, KT)
+            scan_key_files(Rest, KeyDir, [File | Acc], CloseFile, KT)
     end.
 
 %%
@@ -981,7 +978,6 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
             Lock = poll_for_merge_lock(Dirname),
             ScanResult =
             try
-                _ = poll_deferred_delete_queue_empty(),
                 if ReadWriteModeP ->
                         %% This purge will acquire the write lock
                         %% prior to doing anything.
@@ -1031,7 +1027,7 @@ init_keydir_scan_key_files(_Dirname, _Keydir, _KT, 0) ->
 init_keydir_scan_key_files(Dirname, KeyDir, KT, Count) ->
     try
         SortedFiles = readable_files(Dirname),
-        _ = scan_key_files(SortedFiles, KeyDir, [], true, false, KT)
+        _ = scan_key_files(SortedFiles, KeyDir, [], true, KT)
     catch _X:_Y ->
             error_logger:error_msg("scan_key_files: ~p ~p @ ~p\n",
                                    [_X, _Y, erlang:get_stacktrace()]),
@@ -1058,7 +1054,7 @@ get_filestate(FileId,
 
 list_data_files(Dirname, WritingFile, MergingFile) ->
     %% Get list of {tstamp, filename} for all files in the directory then
-    %% reverse sort that list and extract the fully-qualified filename.
+    %% sort that list and extract the fully-qualified filename.
     Files1 = bitcask_fileops:data_file_tstamps(Dirname),
     Files2 = bitcask_fileops:data_file_tstamps(Dirname),
     if Files1 == Files2 ->
@@ -1505,12 +1501,6 @@ poll_for_merge_lock(Dirname, N) ->
         _ ->
             timer:sleep(100),
             poll_for_merge_lock(Dirname, N-1)
-    end.
-
-poll_deferred_delete_queue_empty() ->
-    case bitcask_merge_delete:queue_length() of
-        0 -> ok;
-        _ -> receive after 1100 -> poll_deferred_delete_queue_empty() end
     end.
 
 %% Internal merge function for cache_merge functionality.

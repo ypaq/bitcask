@@ -47,11 +47,11 @@
 
 
 -record(state,
-  { handle
-  , is_writer = true
-  , did_fork_merge = false
-  , readers = []
-  }).
+        { handle :: reference()
+          , is_writer = true :: boolean()
+          , did_fork_merge = false :: boolean()
+          , readers = [] :: list()
+        }).
 
 %% The initial state.
 initial_state() ->

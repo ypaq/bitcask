@@ -53,7 +53,7 @@ init(_S) ->
     [{closed, {call, ?MODULE, set_keys, [list(key_gen())]}}].
 
 closed(_S) ->
-    [{opened, {call, bitcask, open, [?TEST_DIR, [read_write, {open_timeout, 0}, sync_strategy()]]}},
+    [{opened, {call, bitcask, open, [?TEST_DIR, [read_write, {open_timeout, 1}, sync_strategy()]]}},
      {closed, {call, ?MODULE, truncate_hint, [int(), int()]}},
      {closed, {call, ?MODULE, corrupt_hint, [int(), int()]}},
      {closed, {call, ?MODULE, create_stale_lock, []}}].
@@ -84,6 +84,8 @@ next_state_data(_From, _To, S, _Res, _Call) ->
 
 %% Precondition (for state data).
 %% Precondition is checked before command is added to the command sequence
+precondition(_From,_To,S,{call,_,merge,_}) ->
+    S#state.bitcask /= undefined;
 precondition(_From,_To,S,{call,_,get,[_,Key]}) ->
     lists:member(Key, S#state.keys); % check the key has not been shrunk away
 precondition(_From,_To,S,{call,_,put,[_,Key,_Val]}) ->
@@ -99,6 +101,8 @@ postcondition(opened, opened, S, {call, _, get, [_, Key]}, not_found) ->
         {ok, Exp} ->
             {expected, Exp, got, not_found}
     end;
+postcondition(_, _, _S, {call, _, open, _}, {error, timeout}) ->
+    false;
 postcondition(opened, opened, S, {call, _, get, [_, Key]}, {ok, Value}) ->
     case orddict:find(Key, S#state.data) of
         {ok, Value} ->
@@ -165,7 +169,12 @@ value() ->
     binary().
 
 sync_strategy() ->
-    {sync_strategy, oneof([none, o_sync])}.
+    case os:type() of
+        {unix, darwin} ->
+            {sync_strategy, oneof([none])};
+        _ ->
+            {sync_strategy, oneof([none, o_sync])}
+    end.
 
 -endif.
 
