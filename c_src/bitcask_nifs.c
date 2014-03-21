@@ -1890,7 +1890,7 @@ void itr_release_internal(ErlNifEnv* env, bitcask_keydir_handle* handle)
     if (handle->keydir->keyfolders == 0 && handle->keydir->pending != NULL)
     {
         DEBUG2("LINE %d itr_release\r\n", __LINE__);
-        fprintf(stderr, "Merge pending entries\n");
+        //fprintf(stderr, "Merge pending entries\n");
         merge_pending_entries(env, handle->keydir);
         handle->keydir->iter_generation++;
     }
