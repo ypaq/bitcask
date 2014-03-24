@@ -616,10 +616,10 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
 
     %% Close the original input files, schedule them for deletion,
     %% close keydirs, and release our lock
-    bitcask_fileops:close_all(State#mstate.input_files ++ ExpiredFilesFinished),
     {_, _, _, {IterGeneration, _, _, _}} = bitcask_nifs:keydir_info(LiveKeyDir),
     FileNames = [F#filestate.filename || F <- State#mstate.input_files ++ ExpiredFilesFinished],
     _ = [catch set_setuid_bit(F) || F <- FileNames],
+    bitcask_fileops:close_all(State#mstate.input_files ++ ExpiredFilesFinished),
     bitcask_merge_delete:defer_delete(Dirname, IterGeneration, FileNames),
 
     %% Explicitly release our keydirs instead of waiting for GC
