@@ -657,8 +657,42 @@ consider_for_merge(FragTrigger, DeadBytesTrigger, ExpirationGraceTime) ->
                        )
     end.
 
+merge_window(Ref) ->
+    State=get_state(Ref),
+    case get_opt(merge_window,State#bc_state.opts) of
+        {ok, always} ->
+            always;
+        {ok, never} ->
+            never;
+        {ok, {StartHour, EndHour}} when StartHour >= 0, StartHour =< 23,
+                                        EndHour >= 0, EndHour =< 23 ->
+            {StartHour, EndHour};
+        Other ->
+            error_logger:error_msg("Invalid bitcask_merge window specified: ~p. "
+                                   "Defaulting to 'always'.\n", [Other]),
+            always
+    end.
+
+in_merge_window(always) ->
+    true;
+in_merge_window(never) ->
+    false;
+in_merge_window({Start, End}) when Start =< End ->
+    {_, {Hour, _, _}} = calendar:local_time(),
+    (Hour >= Start) and (Hour =< End);
+in_merge_window({Start, End}) when Start > End ->
+    {_, {Hour, _, _}} = calendar:local_time(),
+    (Hour >= Start) or (Hour =< End).
+
 -spec needs_merge(reference()) -> {true, {[string()], [string()]}} | false.
 needs_merge(Ref) ->
+    needs_merge(Ref,in_merge_window(merge_window(Ref))).
+
+-spec needs_merge(reference(),boolean()) -> {true, {[string()], [string()]}} | false.
+needs_merge(_,false) -> 
+    false;
+
+needs_merge(Ref,true) ->
     State = get_state(Ref),
     {_KeyCount, Summary} = summary_info(Ref),
 
