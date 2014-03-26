@@ -975,7 +975,7 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
             %%    new data files and deleting old ones.
             %% 4. SortedFiles doesn't contain the list of all of the
             %%    files that we need.
-            Lock = poll_for_merge_lock(Dirname),
+            {ok, Lock} = poll_for_merge_lock(Dirname),
             ScanResult =
             try
                 if ReadWriteModeP ->
@@ -1496,7 +1496,7 @@ poll_for_merge_lock(_Dirname, 0) ->
     end;
 poll_for_merge_lock(Dirname, N) ->
     case bitcask_lockops:acquire(merge, Dirname) of
-        {ok, Lock} ->
+        {ok, _} = Lock ->
             Lock;
         _ ->
             timer:sleep(100),
