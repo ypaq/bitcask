@@ -112,7 +112,7 @@ postcondition(_From,_To,_S,{call,_,_,_},_Res) ->
     true.
 
 qc_test_() ->
-    TestTime = 45,
+    TestTime = 3600,
     {timeout, TestTime*2,
      {setup, fun prepare/0, fun cleanup/1,
       [{timeout, TestTime*2, ?_assertEqual(true,
@@ -120,14 +120,17 @@ qc_test_() ->
 
 prepare() ->
     application:load(bitcask),
+    application:start(bitcask),
     application:set_env(bitcask, require_hint_crc, true).
 
 cleanup(_) ->
+    application:stop(bitcask),
     application:unload(bitcask).
 
 prop_bitcask() ->
     ?FORALL(Cmds, commands(?MODULE),
             begin
+		bitcask_merge_delete:testonly__delete_trigger(),
                 [] = os:cmd("rm -rf " ++ ?TEST_DIR),
                 {H,{_State, StateData}, Res} = run_commands(?MODULE,Cmds),
                 case (StateData#state.bitcask) of
