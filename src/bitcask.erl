@@ -998,6 +998,8 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
                 case Lock of
                     ?POLL_FOR_MERGE_LOCK_PSEUDOFAILURE ->
                         ok;
+                    {error, _} = Error ->
+                        Error;
                     _ ->
                         ok = bitcask_lockops:release(Lock)
                 end
