@@ -166,9 +166,9 @@ close_hintfile(State = #filestate { hintfd = HintFd, hintcrc = HintCRC }) ->
     %% an older version of bitcask will just reject the record at the end of the
     %% hintfile and otherwise work normally.
     Iolist = hintfile_entry(<<>>, 0, 0, ?MAXOFFSET_V2, HintCRC),
-    ok = bitcask_io:file_write(HintFd, Iolist),
-    bitcask_io:file_sync(HintFd),
-    bitcask_io:file_close(HintFd),
+    _ = bitcask_io:file_write(HintFd, Iolist),
+    _ = bitcask_io:file_sync(HintFd),
+    _ = bitcask_io:file_close(HintFd),
     State#filestate { hintfd = undefined, hintcrc = 0 }.
 
 %% Build a list of {tstamp, filename} for all files in the directory that
