@@ -499,20 +499,21 @@ iterator_release(Ref) ->
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
--spec merge(Dirname::string()) -> ok.
+-spec merge(Dirname::string()) -> ok | {error, any()}.
 merge(Dirname) ->
     merge(Dirname, [], {readable_files(Dirname), []}).
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
--spec merge(Dirname::string(), Opts::[_]) -> ok.
+-spec merge(Dirname::string(), Opts::[_]) -> ok | {error, any()}.
 merge(Dirname, Opts) ->
     merge(Dirname, Opts, {readable_files(Dirname), []}).
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
 -spec merge(Dirname::string(), Opts::[_], 
-            {FilesToMerge::[string()],FilesToDelete::[string()]}) -> ok.
+            {FilesToMerge::[string()],FilesToDelete::[string()]})
+           -> ok | {error, any()}.
 merge(_Dirname, _Opts, []) ->
     ok;
 merge(Dirname,Opts,FilesToMerge) when is_list(FilesToMerge) -> 
@@ -520,16 +521,20 @@ merge(Dirname,Opts,FilesToMerge) when is_list(FilesToMerge) ->
 merge(_Dirname, _Opts, {[],_}) ->
     ok;
 merge(Dirname, Opts, {FilesToMerge0, ExpiredFiles0}) ->
-    %% Make sure bitcask app is started so we can pull defaults from env
-    ok = start_app(),
-    %% Filter the files to merge and ensure that they all exist. It's
-    %% possible in some circumstances that we'll get an out-of-date
-    %% list of files.
-    FilesToMerge = [F || F <- FilesToMerge0,
-                         bitcask_fileops:is_file(F)],
-    ExpiredFiles = [F || F <- ExpiredFiles0,
-                         bitcask_fileops:is_file(F)],
-    merge1(Dirname, Opts, FilesToMerge, ExpiredFiles).
+    try
+        %% Make sure bitcask app is started so we can pull defaults from env
+        ok = start_app(),
+        %% Filter the files to merge and ensure that they all exist. It's
+        %% possible in some circumstances that we'll get an out-of-date
+        %% list of files.
+        FilesToMerge = [F || F <- FilesToMerge0,
+                             bitcask_fileops:is_file(F)],
+        ExpiredFiles = [F || F <- ExpiredFiles0,
+                             bitcask_fileops:is_file(F)],
+        merge1(Dirname, Opts, FilesToMerge, ExpiredFiles)
+    catch _:_ ->
+            {error, generic_failure}
+    end.
 
 %% Inner merge function, assumes that bitcask is running and all files exist.
 merge1(_Dirname, _Opts, [], []) ->
