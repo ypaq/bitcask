@@ -86,7 +86,7 @@ next_state_data(opened, opened, S, _, {call, _, delete, [_, Key]}) ->
 next_state_data(_From, _To, S, _Res, _Call) ->
     S.
 
-precondition(_From,_To,S,{call,_,put,[K, _V]}) ->
+precondition(_From,_To,S,{call,_,put,[_H, K, _V]}) ->
     %% This kind of test case should never be generated in the first place.
     %% {[{set,{var,1},
     %%    {call,generic_qc_fsm,set_keys,
