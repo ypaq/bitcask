@@ -112,7 +112,9 @@ get_create_lock(DirName, N) ->
         {ok, Lock} ->
             {ok, Lock};
         {error, locked} ->
-            get_create_lock(DirName, N - 1)
+            get_create_lock(DirName, N - 1);
+        {error, _} = Else ->
+            Else
     end.
    
     

@@ -232,6 +232,8 @@ get(Ref, Key, TryNum) ->
                         {error, enoent} ->
                             %% merging deleted file between keydir_get and here
                             get(Ref, Key, TryNum-1);
+                        {error, _} = Else ->
+                            Else;
                         {Filestate, S2} ->
                             put_state(Ref, S2),
                             case bitcask_fileops:read(Filestate,
@@ -1064,7 +1066,9 @@ get_filestate(FileId,
                     {error, enoent};
                 {ok, Filestate} ->
                     {Filestate, State#bc_state{read_files =
-                                      [Filestate | State#bc_state.read_files]}}
+                                      [Filestate | State#bc_state.read_files]}};
+                {error, _} = Else ->
+                    Else
             end
     end.
 

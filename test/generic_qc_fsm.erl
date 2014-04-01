@@ -218,7 +218,7 @@ prop(FI_enabledP, VerboseP) ->
                 measure(level_5_files, Level5,
                 measure(level_6_files, Level6,
                 aggregate(zip(state_names(H),command_names(Cmds)), 
-                          conjunction([{postQQQconditions, equals(Res, ok)},
+                          conjunction([{postconditions, equals(Res, ok)},
                                        {verify_trace, Sane},
                                        {final_close_ok, CloseOK}]))))))))))))
             end).
