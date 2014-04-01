@@ -194,7 +194,7 @@ prop(FI_enabledP, VerboseP) ->
                                Else
                        end,
 
-                ok = really_delete_dir(TestDir),
+                %% ok = really_delete_dir(TestDir),
 
                 ?WHENFAIL(
                 ?QC_FMT("Trace: ~P\nverify_trace: ~p\n", [Trace, 150, Sane]),
@@ -309,11 +309,26 @@ close(H) ->
 
 get(H, K) ->
     %% io:format(user, "get ~p,", [K]),
-    bitcask:get(H, K).
+    
+    case bitcask:get(H, K) of
+        {ok, V} = X ->
+            event_logger:event({get, get, K, V}),
+            X;
+        not_found = X ->
+            event_logger:event({get, get, K, not_found}),
+            X
+    end.
 
 put(H, K, V) ->
     %% io:format(user, "put ~p,", [K]),
-    bitcask:put(H, K, V).
+    case bitcask:put(H, K, V) of
+        ok = X ->
+            event_logger:event({put, yes, K, V}),
+            X;
+        X ->
+            event_logger:event({put, maybe, K, V, X}),
+            X
+    end.
 
 put_filler(not_open, _Ks, _V) ->
     put_result_ignored;
@@ -326,7 +341,14 @@ put_filler(H, {NumKs, Prefix}, ValSize) ->
 
 delete(H, K) ->
     %% io:format(user, "delete ~p,", [K]),
-    bitcask:delete(H, K).
+    case bitcask:delete(H, K) of
+        ok = X ->
+            event_logger:event({delete, yes, K}),
+            X;
+        X ->
+            event_logger:event({delete, maybe, K, X}),
+            X
+    end.
 
 fold_all(not_open) ->
     fold_result_ignored;
