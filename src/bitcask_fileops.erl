@@ -188,9 +188,7 @@ data_file_tstamps(Dirname) ->
                               Acc
                       end
               end,
-              [], Files);
-        {error, Reason} ->
-            {error, Reason}
+              [], Files)
     end.
 
 %% @doc Use only after merging, to permanently delete a data file.
