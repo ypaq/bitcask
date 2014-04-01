@@ -185,42 +185,14 @@ prop(FI_enabledP, VerboseP) ->
                                Else
                        end,
 
-                NumFilesS = os:cmd("find " ++ TestDir ++ " -type f | wc -l"),
-                {NumFiles, _} = string:to_integer(string:strip(NumFilesS)),
-                LogsS = os:cmd("(ls " ++ TestDir ++ "/*.log | wc -l) 2> /dev/null"),
-                {Logs, _} = string:to_integer(string:strip(LogsS)),
-                Level0S = os:cmd("(ls " ++ TestDir ++ "/sst_0 | wc -l) 2> /dev/null"),
-                {Level0, _} = string:to_integer(string:strip(Level0S)),
-                Level1S = os:cmd("(ls " ++ TestDir ++ "/sst_1 | wc -l) 2> /dev/null"),
-                {Level1, _} = string:to_integer(string:strip(Level1S)),
-                Level2S = os:cmd("(ls " ++ TestDir ++ "/sst_2 | wc -l) 2> /dev/null"),
-                {Level2, _} = string:to_integer(string:strip(Level2S)),
-                Level3S = os:cmd("(ls " ++ TestDir ++ "/sst_3 | wc -l) 2> /dev/null"),
-                {Level3, _} = string:to_integer(string:strip(Level3S)),
-                Level4S = os:cmd("(ls " ++ TestDir ++ "/sst_4 | wc -l) 2> /dev/null"),
-                {Level4, _} = string:to_integer(string:strip(Level4S)),
-                Level5S = os:cmd("(ls " ++ TestDir ++ "/sst_5 | wc -l) 2> /dev/null"),
-                {Level5, _} = string:to_integer(string:strip(Level5S)),
-                Level6S = os:cmd("(ls " ++ TestDir ++ "/sst_6 | wc -l) 2> /dev/null"),
-                {Level6, _} = string:to_integer(string:strip(Level6S)),
-
-  ok = really_delete_dir(TestDir),
+                ok = really_delete_dir(TestDir),
 
                 ?WHENFAIL(
                 ?QC_FMT("Trace: ~p\nverify_trace: ~p\nfinal_close_ok: ~p\n", [Trace, Sane, CloseOK]),
-                measure(num_files, NumFiles,
-                measure(log_files, Logs,
-                measure(level_0_files, Level0,
-                measure(level_1_files, Level1,
-                measure(level_2_files, Level2,
-                measure(level_3_files, Level3,
-                measure(level_4_files, Level4,
-                measure(level_5_files, Level5,
-                measure(level_6_files, Level6,
                 aggregate(zip(state_names(H),command_names(Cmds)), 
                           conjunction([{postconditions, equals(Res, ok)},
                                        {verify_trace, Sane},
-                                       {final_close_ok, CloseOK}]))))))))))))
+                                       {final_close_ok, CloseOK}])))
             end).
 
 remove_timestamps(Trace) ->
@@ -347,6 +319,17 @@ put_filler(H, {NumKs, Prefix}, ValSize) ->
 delete(H, K) ->
     %% io:format(user, "delete ~p,", [K]),
     bitcask:delete(H, K).
+
+fold_all(not_open) ->
+    fold_result_ignored;
+fold_all(H) ->
+    F = fun(K, V, Acc) ->
+                event_logger:event({get, fold, K, V}),
+                [{K,V}|Acc]
+        end,
+    _Res = bitcask:fold(H, F, []),
+    %%io:format(user, "~p,", [_Res]),
+    ok.
 
 merge(H) ->
     bitcask:merge(H).
