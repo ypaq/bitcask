@@ -242,7 +242,8 @@ typedef struct {
          intercept_args = "const char *path",
          intercept_args_call = "path",
          c_headers = ["<dirent.h>"],
-         intercept_errno = "ENOSPC",
+         %%%% intercept_errno = "EINTR",
+         intercept_errno = "EMFILE",
          intercept_return_type = "DIR *",
          intercept_return_value = "NULL",
          %% Use 2-tuple version here, have the instance name auto-generated
