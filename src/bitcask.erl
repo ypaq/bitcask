@@ -430,12 +430,16 @@ pending_epoch(Keydir) ->
 open_fold_files(_Dirname, 0) ->
     {error, max_retries_exceeded_for_fold};
 open_fold_files(Dirname, Count) ->
-    Filenames = list_data_files(Dirname, undefined, undefined),
-    case open_files(Filenames, []) of
-        {ok, Files} ->
-            {ok, Files};
-        error ->
-            open_fold_files(Dirname, Count-1)
+    try
+        Filenames = list_data_files(Dirname, undefined, undefined),
+        case open_files(Filenames, []) of
+            {ok, Files} ->
+                {ok, Files};
+            error ->
+                open_fold_files(Dirname, Count-1)
+        end
+    catch X:Y ->
+            {error, {X,Y}}
     end.
 
 %%
