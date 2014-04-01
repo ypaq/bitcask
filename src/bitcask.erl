@@ -266,10 +266,15 @@ put(Ref, Key, Value) ->
             ok
     end,
 
-    {Ret, State1} = do_put(Key, Value, State, 
-                           ?DIABOLIC_BIG_INT, undefined),
-    put_state(Ref, State1),
-    Ret.
+    try
+        {Ret, State1} = do_put(Key, Value, State,
+                               ?DIABOLIC_BIG_INT, undefined),
+        put_state(Ref, State1),
+        Ret
+    catch throw:{unrecoverable, Error, State2} ->
+            put_state(Ref, State2),
+            {error, Error}
+    end.
 
 %% @doc Delete a key from a bitcask datastore.
 -spec delete(reference(), Key::binary()) -> ok.
@@ -1374,7 +1379,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                                              write_lock = WriteLock };
                 {error, Reason} ->
                     State2 = undefined,
-                    throw({error, {write_locked, Reason, State#bc_state.dirname}})
+                    throw({unrecoverable, {write_locked, Reason, State#bc_state.dirname}, State})
             end;
 
         ok ->
