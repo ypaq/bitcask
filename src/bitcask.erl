@@ -1360,35 +1360,39 @@ do_put(_Key, _Value, State, 0, LastErr) ->
     {{error, LastErr}, State};
 do_put(Key, Value, #bc_state{write_file = WriteFile} = State, 
        Retries, _LastErr) ->
-    case bitcask_fileops:check_write(WriteFile, Key, Value,
-                                     State#bc_state.max_file_size) of
-        wrap ->
-            %% Time to start a new write file. Note that we do not close the old
-            %% one, just transition it. The thinking is that closing/reopening
-            %% for read only access would flush the O/S cache for the file,
-            %% which may be undesirable.
-            State2 = wrap_write_file(State);
-        fresh ->
-            %% Time to start our first write file.
-            case bitcask_lockops:acquire(write, State#bc_state.dirname) of
-                {ok, WriteLock} ->
-                    {ok, NewWriteFile} = bitcask_fileops:create_file(
-                                           State#bc_state.dirname,
-                                           State#bc_state.opts,
-                                           State#bc_state.keydir),
-                    ok = bitcask_lockops:write_activefile(
-                           WriteLock,
-                           bitcask_fileops:filename(NewWriteFile)),
-                    State2 = State#bc_state{ write_file = NewWriteFile,
-                                             write_lock = WriteLock };
-                {error, Reason} ->
-                    State2 = undefined,
-                    throw({unrecoverable, {write_locked, Reason, State#bc_state.dirname}, State})
-            end;
-
-        ok ->
-            State2 = State
-    end,
+    State2 =
+        case bitcask_fileops:check_write(WriteFile, Key, Value,
+                                         State#bc_state.max_file_size) of
+            wrap ->
+                %% Time to start a new write file. Note that we do not
+                %% close the old one, just transition it. The thinking
+                %% is that closing/reopening for read only access
+                %% would flush the O/S cache for the file, which may
+                %% be undesirable.
+                wrap_write_file(State);
+            fresh ->
+                %% Time to start our first write file.
+                case bitcask_lockops:acquire(write, State#bc_state.dirname) of
+                    {ok, WriteLock} ->
+                        try
+                            {ok, NewWriteFile} = bitcask_fileops:create_file(
+                                                   State#bc_state.dirname,
+                                                   State#bc_state.opts,
+                                                   State#bc_state.keydir),
+                            ok = bitcask_lockops:write_activefile(
+                                   WriteLock,
+                                   bitcask_fileops:filename(NewWriteFile)),
+                            State#bc_state{ write_file = NewWriteFile,
+                                            write_lock = WriteLock }
+                        catch error:{badmatch,Error} ->
+                                throw({unrecoverable, Error, State})
+                        end;
+                    {error, _} = Error ->
+                        throw({unrecoverable, Error, State})
+                end;
+            ok ->
+                State
+        end,
 
     Tstamp = bitcask_time:tstamp(),
     case Value of
