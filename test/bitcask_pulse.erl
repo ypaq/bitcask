@@ -47,10 +47,10 @@
 
 
 -record(state,
-  { handle
-  , is_writer = true
-  , did_fork_merge = false
-  , readers = []
+  { handle :: reference() | tuple()
+  , is_writer = true :: boolean()
+  , did_fork_merge = false :: boolean()
+  , readers = [] :: list()
   }).
 
 %% The initial state.
@@ -334,7 +334,7 @@ run_commands_on_node(LocalOrSlave, Cmds, Seed, Verbose) ->
       _:Err ->
         {'EXIT', Err}
     end,
-    really_delete_bitcask(),
+    %really_delete_bitcask(),
     X end).
 
 prop_pulse() ->
@@ -419,7 +419,7 @@ prop_pulse_test_() ->
     end,
     io:format(user, "prop_pulse_test time: ~p + ~p seconds\n",
               [Timeout, ExtraTO]),
-    {timeout, (Timeout+ExtraTO) + 60,
+    {timeout, (Timeout+ExtraTO),
      fun() ->
              copy_bitcask_app(),
              ?assert(eqc:quickcheck(eqc:testing_time(Timeout,

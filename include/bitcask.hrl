@@ -29,8 +29,11 @@
 -define(FMT(Str, Args), lists:flatten(io_lib:format(Str, Args))).
 
 -define(TOMBSTONE, <<"bitcask_tombstone">>).
+-define(TOMBSTONE2_STR, "bitcask_tombstone2").
+-define(TOMBSTONE2_BIN, <<?TOMBSTONE2_STR>>).
 -define(TOMBSTONE_SIZE, size(?TOMBSTONE)).
--define(MAX_TOMBSTONE_SIZE, ?TOMBSTONE_SIZE).
+-define(TOMBSTONE2_SIZE, (size(?TOMBSTONE2_BIN)+8+4)).
+-define(MAX_TOMBSTONE_SIZE, ?TOMBSTONE2_SIZE).
 
 -define(OFFSETFIELD_V1,  64).
 -define(TOMBSTONEFIELD_V2, 1).
