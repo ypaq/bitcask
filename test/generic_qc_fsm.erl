@@ -67,7 +67,7 @@ opened(S) ->
     [{closed, {call, ?MODULE, close, [S#state.handle]}},
      {opened, {call, ?MODULE, get, [S#state.handle, key(S)]}},
      {opened, {call, ?MODULE, put, [S#state.handle, key(S), value()]}},
-     {opened, {call, ?MODULE, put_filler, [S#state.handle, gen_filler_keys(), gen_filler_value()]}},
+     {opened, {call, ?MODULE, put_filler, [S#state.handle, gen_filler_keys(), gen_filler_size()]}},
      {opened, {call, ?MODULE, delete, [S#state.handle, key(S)]}},
      {opened, {call, ?MODULE, fold_all, [S#state.handle]}},
      {opened, {call, ?MODULE, merge, [S#state.dir]}}
@@ -87,18 +87,10 @@ next_state_data(_From, _To, S, _Res, _Call) ->
     S.
 
 precondition(_From,_To,S,{call,_,put,[_H, K, _V]}) ->
-    %% This kind of test case should never be generated in the first place.
-    %% {[{set,{var,1},
-    %%    {call,generic_qc_fsm,set_keys,
-    %%     [[<<0,0,0,0,0>>],{var,parameter_test_dir}]}},
-    %%   {set,{var,2},
-    %%    {call,generic_qc_fsm,open,
-    %%     [{var,parameter_test_dir},
-    %%      [read_write,{open_timeout,60},{expiry_secs,0}]]}},
-    %%   {set,{var,6},{call,generic_qc_fsm,put,[{var,2},<<124,193,0,0,0,0>>,<<>>]}},
-    %%   {set,{var,7},{call,generic_qc_fsm,fold_all,[{var,2}]}}],
-    %%  1}
-    %% WTF, why do I have to do this precondition??
+    lists:member(K, S#state.keys);
+precondition(_From,_To,S,{call,_,get,[_H, K]}) ->
+    lists:member(K, S#state.keys);
+precondition(_From,_To,S,{call,_,delete,[_H, K]}) ->
     lists:member(K, S#state.keys);
 precondition(_From,_To,_S,_Call) ->
     true.
@@ -134,7 +126,6 @@ prop(FI_enabledP) ->
 
 prop(FI_enabledP, VerboseP) ->
     _ = faulterl_nif:poke("bc_fi_enabled", 0, <<0:8/native>>, false),
-    {ok, RE1} = re:compile("open,.*put,.*close,.*open,.*get,"),
     ?FORALL({Cmds, Seed}, {commands(?MODULE), choose(1,99999)},
             begin
                 faulterl_nif:poke("bc_fi_enabled", 0, <<0:8/native>>, false),
@@ -175,29 +166,15 @@ prop(FI_enabledP, VerboseP) ->
                 %% application:unload(bitcask),
                 Trace0 = event_logger:get_events(),
                 Trace = remove_timestamps(Trace0),
-                Sane0 = verify_trace(Trace),
-                Sane = case Sane0 of
-                           {get,_How,_K,expected,[_EXP],got,_GOT}
-                             when %(is_binary(EXP) andalso GOT == not_found)
-                                  %orelse
-                                  %(EXP == not_found andalso is_binary(GOT)) ->
-                                  true ->
-                               Str = lists:flatten(io_lib:format("~w", [Trace])),
-                               case re:run(Str, RE1) of
-                                   {match, _} ->
-                                       ?QC_FMT("SKIP1", []),
-                                       true;
-                                   _ ->
-                                       Sane0
-                               end;
-                           Else ->
-                               Else
-                       end,
+                Sane = verify_trace(Trace),
 
-                %% ok = really_delete_dir(TestDir),
+                ok = really_delete_dir(TestDir),
 
                 ?WHENFAIL(
-                ?QC_FMT("Trace: ~P\nverify_trace: ~p\n", [Trace, 150, Sane]),
+                begin
+                  SimpleTrace = simplify_trace(Trace),
+                  ?QC_FMT("Trace: ~P\nverify_trace: ~p\n", [SimpleTrace, 25, Sane])
+                end,
                 aggregate(zip(state_names(H),command_names(Cmds)), 
                           conjunction([{postconditions, equals(Res, ok)},
                                        {verify_trace, Sane}])))
@@ -231,8 +208,12 @@ verify_trace([{set_keys, Keys}|TraceTail]) ->
                   {true, dict:store(K, [V], D)};
              ({put, maybe, K, V, _Err}, {true, D}) ->
                   io:format(user, "pm,", []),
-                  Vs = dict:fetch(K, D),
-                  {true, dict:store(K, [V|Vs], D)};
+                  case dict:find (K, D) of
+                      {ok, Vs} ->
+                          {true, dict:store(K, [V|Vs], D)};
+                      error ->
+                          {true, dict:store(K, [V], D)}
+                  end;
              ({delete, yes, K}, {true, D}) ->
                   {true, dict:store(K, [not_found], D)};
              ({delete, maybe, K, _Err}, {true, D}) ->
@@ -251,13 +232,34 @@ verify_trace([{set_keys, Keys}|TraceTail]) ->
           end, {true, Dict0}, TraceTail),
     Bool.
 
+simplify_trace(Trace) ->
+    lists:filter(
+      fun({put, _, K, _}) ->
+              zero_suffix_p(K);
+         ({delete, _, K}) ->
+              zero_suffix_p(K);
+         ({delete, _, K, _}) ->
+              zero_suffix_p(K);
+         ({get, _, K, _}) ->
+              zero_suffix_p(K);
+         ({open, _}) ->
+              true;
+         ({close, _}) ->
+              true;
+         (_) ->
+              false
+      end, Trace).
+
+zero_suffix_p(K) ->
+    PrefixLen = byte_size(K) - 4,
+    <<_:PrefixLen/binary, Suffix/binary>> = K,
+    Suffix == <<0,0,0,0>>.
+ 
 %% Weight for transition (this callback is optional).
 %% Specify how often each transition should be chosen
 weight(_From, _To,{call,_,close,_}) ->
-    10;
+    25;
 weight(_From, _To,{call,_,merge,_}) ->
-    5;
-weight(_From, _To,{call,_,fold_all,_}) ->
     5;
 weight(_From,_To,{call,_,_,_}) ->
     100.
@@ -267,27 +269,24 @@ set_keys(Keys, _TestDir) -> %% next_state sets the keys for use by key()
     ok.
 
 key_gen(SuffixI) ->
-    ?LET(Prefix,
-         ?SUCHTHAT(X, binary(), X /= <<>>),
-         <<Prefix/binary, SuffixI:32>>).
+    noshrink(?LET(Prefix,
+                  ?SUCHTHAT(X, binary(), X /= <<>>),
+                  <<Prefix/binary, SuffixI:32>>)).
 
 key(#state{keys = Keys}) ->
     elements(Keys).
 
 value() ->
-    binary().
+    noshrink(binary()).
 
 sync_strategy() ->
     {sync_strategy, oneof([none])}.
 
 gen_filler_keys() ->
-    {choose(1, 50), non_empty(binary())}.
-    %% ?LET({N, Prefix}, {choose(1, 4*1000), non_empty(binary())},
-    %%      [<<Prefix/binary, I:32>> || I <- lists:seq(1, N)]).
+    noshrink({choose(1, 50), non_empty(binary())}).
 
-gen_filler_value() ->
-    choose(1, 128*1024).
-    %% ?LET(Size, choose(1, 128*1024), <<42:(Size*8)>>).
+gen_filler_size() ->
+    noshrink(choose(1, 128*1024)).
 
 really_delete_dir(Dir) ->
     [file:delete(X) || X <- filelib:wildcard(Dir ++ "/*")],
@@ -303,10 +302,13 @@ open(Dir, Opts) ->
     %% io:format(user, "open,", []),
     bitcask:open(Dir, Opts).
 
+close(not_open) ->
+    ignored;
 close(H) ->
-    %% io:format(user, "close,", []),
     bitcask:close(H).
 
+get(not_open, _K) ->
+    ignored;
 get(H, K) ->
     %% io:format(user, "get ~p,", [K]),
     
@@ -316,9 +318,13 @@ get(H, K) ->
             X;
         not_found = X ->
             event_logger:event({get, get, K, not_found}),
-            X
+            X;
+        Else ->
+            Else
     end.
 
+put(not_open, _Ks, _V) ->
+    ignored;
 put(H, K, V) ->
     %% io:format(user, "put ~p,", [K]),
     case bitcask:put(H, K, V) of
@@ -331,14 +337,16 @@ put(H, K, V) ->
     end.
 
 put_filler(not_open, _Ks, _V) ->
-    put_result_ignored;
+    ignored;
 put_filler(H, {NumKs, Prefix}, ValSize) ->
-    io:format(user, "<f", []),
+    io:format(user, "<i", []),
     Val = <<42:(ValSize*8)>>,
-    [bitcask:put(H, <<Prefix/binary, N:32>>, Val) || N <- lists:seq(1, NumKs)],
+    [put(H, <<Prefix/binary, N:32>>, Val) || N <- lists:seq(1, NumKs)],
     io:format(user, ">", []),
     ok.
 
+delete(not_open, _K) ->
+    ignored;
 delete(H, K) ->
     %% io:format(user, "delete ~p,", [K]),
     case bitcask:delete(H, K) of
@@ -351,16 +359,19 @@ delete(H, K) ->
     end.
 
 fold_all(not_open) ->
-    fold_result_ignored;
+    ignored;
 fold_all(H) ->
     F = fun(K, V, Acc) ->
                 event_logger:event({get, fold, K, V}),
                 [{K,V}|Acc]
         end,
+    io:format(user, "<f", []),
     _Res = bitcask:fold(H, F, []),
-    %%io:format(user, "~p,", [_Res]),
+    io:format(user, ">", []),
     ok.
 
+merge(not_open) ->
+    ignored;
 merge(H) ->
     bitcask:merge(H).
 
