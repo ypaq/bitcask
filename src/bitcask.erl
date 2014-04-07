@@ -1461,25 +1461,28 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                 #bitcask_entry{tstamp=OldTstamp, file_id=OldFileId,
                                offset=OldOffset} ->
                     Tombstone = ?TOMBSTONE,
-                    {ok, WriteFile2, _, _} =
-                        bitcask_fileops:write(State2#bc_state.write_file,
-                                              Key, Tombstone, Tstamp),
-
-                    case bitcask_nifs:keydir_remove(State2#bc_state.keydir,
-                                                    Key, OldTstamp, OldFileId,
-                                                    OldOffset) of
-                        already_exists ->
-                            {ok, WriteFile3} =
-                                bitcask_fileops:un_write(WriteFile2),
-                            % Merge updated the keydir after tombstone write.
-                            % beat us, so undo and retry in a new file.
-                            State3 = wrap_write_file(
-                                       State2#bc_state {
-                                         write_file = WriteFile3 }),
-                            do_put(Key, Value, State3, 
-                                   Retries - 1, already_exists);
-                        ok ->
-                            {ok, State2#bc_state { write_file = WriteFile2 }}
+                    case bitcask_fileops:write(State2#bc_state.write_file,
+                                               Key, Tombstone, Tstamp) of
+                        {ok, WriteFile2, _, _} ->
+                            case bitcask_nifs:keydir_remove(State2#bc_state.keydir,
+                                                            Key, OldTstamp, OldFileId,
+                                                            OldOffset) of
+                                already_exists ->
+                                    %% Merge updated the keydir after tombstone
+                                    %% write.  beat us, so undo and retry in a
+                                    %% new file.
+                                    {ok, WriteFile3} =
+                                        bitcask_fileops:un_write(WriteFile2),
+                                    State3 = wrap_write_file(
+                                               State2#bc_state {
+                                                 write_file = WriteFile3 }),
+                                    do_put(Key, Value, State3,
+                                           Retries - 1, already_exists);
+                                ok ->
+                                    {ok, State2#bc_state { write_file = WriteFile2 }}
+                            end;
+                        {error, _} = ErrorTomb ->
+                            throw({unrecoverable, ErrorTomb, State2})
                     end
             end
     end.
