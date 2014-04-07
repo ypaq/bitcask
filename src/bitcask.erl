@@ -551,10 +551,6 @@ merge(Dirname, Opts, {FilesToMerge0, ExpiredFiles0}) ->
 merge1(_Dirname, _Opts, [], []) ->
     ok;
 merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
-    %% Test to see if this is a complete or partial merge
-    Partial = not(lists:usort(readable_files(Dirname)) == 
-                  lists:usort(FilesToMerge)),
-    
     KT = get_key_transform(get_opt(key_transform, Opts)),
 
     %% Try to lock for merging
@@ -605,6 +601,17 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
                                                     {InFilesAcc,[F|InExpiredAcc]}
                                             end
                             end, {[],[]}, InFiles1),
+
+    %% Test to see if this is a complete or partial merge
+    %% We perform this test now because our efforts to open the input files
+    %% in the InFiles0 list comprehension above may have had an open
+    %% failure.  The open(2) shouldn't fail, except, of course, when it
+    %% does, e.g. EMFILE, ENFILE, the OS decides EINTR because "reasons", ...
+    Partial = lists:usort(readable_files(Dirname))
+              /=
+              lists:usort([F#filestate.filename || F <- InFiles2]),
+    io:format("ZZZ Partial = ~p\n", [Partial]),
+
     % This sort is very important. The merge expects to visit files in order
     % to properly detect current values, and could resurrect old values if not.
     InFiles = lists:sort(fun(#filestate{tstamp=FTL}, #filestate{tstamp=FTR}) ->
