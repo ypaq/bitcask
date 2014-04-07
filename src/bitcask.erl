@@ -501,13 +501,23 @@ iterator_release(Ref) ->
 %%      into a more compact form.
 -spec merge(Dirname::string()) -> ok | {error, any()}.
 merge(Dirname) ->
-    merge(Dirname, [], {readable_files(Dirname), []}).
+    try
+        merge(Dirname, [], {readable_files(Dirname), []})
+    catch
+        Error:Reason ->
+            {error, {Error, Reason}}
+    end.
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
 -spec merge(Dirname::string(), Opts::[_]) -> ok | {error, any()}.
 merge(Dirname, Opts) ->
-    merge(Dirname, Opts, {readable_files(Dirname), []}).
+    try
+        merge(Dirname, Opts, {readable_files(Dirname), []})
+    catch
+        Error:Reason ->
+            {error, {Error, Reason}}
+    end.
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
