@@ -168,7 +168,7 @@ prop(FI_enabledP, VerboseP) ->
                 Trace = remove_timestamps(Trace0),
                 Sane = verify_trace(Trace),
 
-                %% ok = really_delete_dir(TestDir),
+                ok = really_delete_dir(TestDir),
 
                 ?WHENFAIL(
                 begin
