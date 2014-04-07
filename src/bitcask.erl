@@ -542,7 +542,11 @@ merge(Dirname, Opts, {FilesToMerge0, ExpiredFiles0}) ->
         ExpiredFiles = [F || F <- ExpiredFiles0,
                              bitcask_fileops:is_file(F)],
         merge1(Dirname, Opts, FilesToMerge, ExpiredFiles)
-    catch _X:_Y ->
+    catch
+        throw:Reason ->
+            Reason;
+        _X:_Y ->
+            io:format(user, "X Y = ~p ~p\n", [_X, _Y]),
             {error, generic_failure}
     end.
 
