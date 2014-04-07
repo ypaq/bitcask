@@ -532,7 +532,8 @@ merge(Dirname, Opts, {FilesToMerge0, ExpiredFiles0}) ->
         ExpiredFiles = [F || F <- ExpiredFiles0,
                              bitcask_fileops:is_file(F)],
         merge1(Dirname, Opts, FilesToMerge, ExpiredFiles)
-    catch _:_ ->
+    catch _X:_Y ->
+            io:format(user, "merge,~w,~w,", [_X, _Y]),
             {error, generic_failure}
     end.
 
@@ -1003,6 +1004,9 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
                         ok
                 end,
                 init_keydir_scan_key_files(Dirname, KeyDir, KT)
+            catch
+                _:Detail ->
+                    {error, {purge_setuid_or_init_scan, Detail}}
             after
                 case Lock of
                     ?POLL_FOR_MERGE_LOCK_PSEUDOFAILURE ->
@@ -1059,8 +1063,8 @@ init_keydir_scan_key_files(Dirname, KeyDir, KT, Count) ->
                 bitcask_nifs:increment_file_id(KeyDir, MaxSetuid)
         end
     catch _X:_Y ->
-            error_logger:error_msg("scan_key_files: ~p ~p @ ~p\n",
-                                   [_X, _Y, erlang:get_stacktrace()]),
+            error_msg_perhaps("scan_key_files: ~p ~p @ ~p\n",
+                              [_X, _Y, erlang:get_stacktrace()]),
             init_keydir_scan_key_files(Dirname, KeyDir, KT, Count - 1)
     end.
 
@@ -1521,9 +1525,9 @@ purge_setuid_files(Dirname) ->
                 end
             catch
                 X:Y ->
-                    error_logger:error_msg("While deleting stale merge input "
-                                           "files from ~p: ~p ~p @ ~p\n",
-                                           [X, Y, erlang:get_stacktrace()])
+                    error_msg_perhaps("While deleting stale merge input "
+                                      "files from ~p: ~p ~p @ ~p\n",
+                                      [X, Y, erlang:get_stacktrace()])
             after
                 bitcask_lockops:release(WriteLock)
             end;
@@ -1578,6 +1582,14 @@ get_key_transform(KT)
     KT;
 get_key_transform(_State) ->
     fun kt_id/1.
+
+-ifdef(TEST).
+error_msg_perhaps(_Fmt, _Args) ->
+    ok.
+-else. %TEST
+error_msg_perhaps(Fmt, Args) ->
+    error_logger:error_msg(Fmt, Args).
+-endif. %TEST
 
 %% ===================================================================
 %% EUnit tests
