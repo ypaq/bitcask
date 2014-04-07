@@ -299,12 +299,20 @@ really_delete_dir(Dir) ->
     end.
 
 open(Dir, Opts) ->
-    %% io:format(user, "open,", []),
-    bitcask:open(Dir, Opts).
+    case bitcask:open(Dir, Opts) of
+        H when is_reference(H) ->
+            io:format(user, "{", []),
+            H;
+        Else ->
+            io:format(user, ",", []),
+            Else
+    end.
 
 close(not_open) ->
+    io:format(user, ",", []),
     ignored;
 close(H) ->
+    io:format(user, "}", []),
     bitcask:close(H).
 
 get(not_open, _K) ->
