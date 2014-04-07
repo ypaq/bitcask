@@ -30,24 +30,16 @@ config() ->
 #ifndef TRIGGER_COMMONPATHS
 #define TRIGGER_COMMONPATHS
 static char *interesting_strings[] = {
-    /* Interesting eleveldb things */
-    \".log\",
-    \"CURRENT\",
-    \"LOCK\",
-    \"LOG\",
-    \"MANIFEST\",
-    \"sst_\",
-    \".db\",
+    /* \"generic.qc\", /* Used by generic_qc_fsm.erl */
     /* Interesting bitcask things */
     \"bitcask.data\",
     \"bitcask.hint\",
-    \"generic.qc\", /* Used by generic_qc_fsm.erl */
     NULL
 };
 
-static int flock_op_array[] = { LOCK_SH, LOCK_EX };
-static int fcntl_cmd_array[] = { F_SETLK, F_SETLKW };
-static int open_write_op_array[] = { O_WRONLY, O_RDWR };
+static int flock_op_array[] = { LOCK_SH, LOCK_EX, 0 };
+static int fcntl_cmd_array[] = { F_SETLK, F_SETLKW, 0 };
+static int open_write_op_array[] = { O_WRONLY, O_RDWR, 0 };
 #endif
 ",
 
@@ -88,7 +80,7 @@ typedef struct {
     for (i = 0; array[i] != 0 && i < sizeof(a->array); i++) {
         a->array[i] = array[i];
     }
-    array[i] = 0;
+    a->array[i] = 0;
 ",
     %% NOTE: 'path' below matches last arg to config()
     BitC_TBody = "
@@ -117,7 +109,7 @@ typedef struct {
     for (i = 0; array[i] != 0 && i < sizeof(a->array); i++) {
         a->array[i] = array[i];
     }
-    array[i] = 0;
+    a->array[i] = 0;
 ",
     %% NOTE: 'path' below matches last arg to config()
     IntArgC_TBody = "
@@ -189,7 +181,7 @@ typedef struct {
          intercept_return_value = "-1",
          %% Use 2-tuple version here, have the instance name auto-generated
          intercept_triggers = [{"i_arg_stat_path", "\"-unused-arg-\""},
-                               {"random", "percent_7", "7"}]
+                               {"random", "percent_7", "4"}]
      },
      #fi{	% both?/OS X version
          name = "flock",
@@ -229,7 +221,7 @@ typedef struct {
                                 "    va_start(ap, checked_operation); " ++
                                 "mode = va_arg(ap, int); va_end(ap);\n",
          c_headers = ["<fcntl.h>", "<stdarg.h>"],
-         intercept_errno = "ENOSPC",
+         intercept_errno = "ENFILE",
          intercept_return_type = "int",
          intercept_return_value = "-1",
          %% Use 2-tuple version here, have the instance name auto-generated
@@ -260,7 +252,7 @@ typedef struct {
          intercept_return_type = "int",
          intercept_return_value = "-1",
          %% Use 2-tuple version here, have the instance name auto-generated
-         intercept_triggers = [{"random", "", "7"}]
+         intercept_triggers = [{"random", "", "0"}]
      },
      %% HRM, pread() is heavily used by EQC via dets, bummer.
      %% We need more smarts here, somehow.
@@ -276,7 +268,7 @@ typedef struct {
          intercept_return_type = "ssize_t",
          intercept_return_value = "-1",
          %% Use 2-tuple version here, have the instance name auto-generated
-         intercept_triggers = [{"random", "", "7"}]
+         intercept_triggers = [{"random", "", "0"}]
      },
      #fi{	% OS X version
          name = "unlink",
