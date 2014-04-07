@@ -609,7 +609,6 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
     Partial = lists:usort(readable_files(Dirname))
               /=
               lists:usort([F#filestate.filename || F <- InFiles2]),
-    io:format("ZZZ Partial = ~p\n", [Partial]),
 
     % This sort is very important. The merge expects to visit files in order
     % to properly detect current values, and could resurrect old values if not.

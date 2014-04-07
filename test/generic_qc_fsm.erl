@@ -168,12 +168,12 @@ prop(FI_enabledP, VerboseP) ->
                 Trace = remove_timestamps(Trace0),
                 Sane = verify_trace(Trace),
 
-                ok = really_delete_dir(TestDir),
+                %% ok = really_delete_dir(TestDir),
 
                 ?WHENFAIL(
                 begin
                   SimpleTrace = simplify_trace(Trace),
-                  ?QC_FMT("Trace: ~P\nverify_trace: ~p\n", [SimpleTrace, 25, Sane])
+                  ?QC_FMT("Trace: ~P\nverify_trace: ~P\n", [SimpleTrace, 25, Sane, 25])
                 end,
                 aggregate(zip(state_names(H),command_names(Cmds)), 
                           conjunction([{postconditions, equals(Res, ok)},
@@ -212,7 +212,7 @@ verify_trace([{set_keys, Keys}|TraceTail]) ->
                       {ok, Vs} ->
                           {true, dict:store(K, [V|Vs], D)};
                       error ->
-                          {true, dict:store(K, [V], D)}
+                          {true, dict:store(K, [not_found, V], D)}
                   end;
              ({delete, yes, K}, {true, D}) ->
                   {true, dict:store(K, [not_found], D)};
@@ -220,6 +220,43 @@ verify_trace([{set_keys, Keys}|TraceTail]) ->
                   io:format(user, "dm,", []),
                   Vs = dict:fetch(K, D),
                   {true, dict:store(K, [not_found|Vs], D)};
+             ({fold, start, _ID}, Acc) ->
+                  Acc;
+             ({fold, failed, _ID}, Acc) ->
+                  Acc;
+             ({fold, done, ID}, {true, D}) ->
+                  Trc1 = lists:dropwhile(
+                           fun({fold, start, I}) when I == ID -> false;
+                              (_)                             -> true
+                           end, TraceTail),
+                  Trc2 = lists:takewhile(
+                           fun({fold, done, I}) when I == ID -> false;
+                              (_)                            -> true
+                           end, Trc1),
+                  FoldGotDict = dict:from_list(
+                                  [{K, V} || {get, fold, K, V} <- Trc2]),
+                  Good = dict:fold(
+                           fun(K, MaybeVs, true) ->
+                                   case dict:find(K, FoldGotDict) of
+                                       error ->
+                                           case lists:member(not_found, MaybeVs) of
+                                               true ->
+                                                   true;
+                                               false ->
+                                                   {fold, did_not_find, K, MaybeVs}
+                                           end;
+                                       {ok, Val} ->
+                                           case lists:member(Val, MaybeVs) of
+                                               true ->
+                                                   true;
+                                               false ->
+                                                   {fold, wrong_val, K, expected, MaybeVs, got, Val}
+                                           end
+                                   end;
+                              (_, _, Acc) ->
+                                   Acc
+                           end, true, D),
+                  {Good, D};
              (open, Acc) ->
                   Acc;
              ({open, _}, Acc) ->
@@ -227,7 +264,7 @@ verify_trace([{set_keys, Keys}|TraceTail]) ->
              (close, Acc) ->
                   Acc;
              (_Else, Acc) ->
-                  %%io:format(user, "verify_trace: ~p\n", [_Else]),
+                  io:format(user, "verify_trace: ~P\n", [_Else, 20]),
                   Acc
           end, {true, Dict0}, TraceTail),
     Bool.
@@ -374,7 +411,14 @@ fold_all(H) ->
                 [{K,V}|Acc]
         end,
     io:format(user, "<f", []),
-    _Res = bitcask:fold(H, F, []),
+    ID = now(),
+    event_logger:event({fold, start, ID}),
+    case bitcask:fold(H, F, []) of
+        {error, _} ->
+            event_logger:event({fold, failed, ID});
+        _Yay ->
+            event_logger:event({fold, done, ID})
+    end,
     io:format(user, ">", []),
     ok.
 
