@@ -54,9 +54,9 @@
 -define(OPEN_FOLD_RETRIES, 3).
 -endif.
 
--include_lib("eunit/include/eunit.hrl").
 -ifdef(TEST).
 -compile(export_all).
+-include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 -export([leak_t0/0, leak_t1/0]).
 -endif.

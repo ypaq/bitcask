@@ -25,6 +25,7 @@
 
 -export([create_file/3,
          open_file/1,
+         open_file/2,
          close/1,
          close_all/1,
          close_for_writing/1,
