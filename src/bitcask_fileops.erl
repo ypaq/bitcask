@@ -460,7 +460,7 @@ check_write(fresh, _Key, _Value, _MaxSize) ->
     fresh;
 check_write(#filestate { ofs = Offset }, Key, Value, MaxSize) ->
     ValSize = case Value of
-                  tombstone -> ?TOMBSTONE_SIZE;
+                  tombstone -> ?TOMBSTONE2_SIZE;
                   _ -> size(Value)
               end,
     Size = ?HEADER_SIZE + size(Key) + ValSize,

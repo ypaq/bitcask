@@ -32,7 +32,8 @@
 -define(TOMBSTONE2_STR, "bitcask_tombstone2").
 -define(TOMBSTONE2_BIN, <<?TOMBSTONE2_STR>>).
 -define(TOMBSTONE_SIZE, size(?TOMBSTONE)).
--define(TOMBSTONE2_SIZE, (size(?TOMBSTONE2_BIN)+8+4)).
+% Size of tombstone + 32 bit file id
+-define(TOMBSTONE2_SIZE, (size(?TOMBSTONE2_BIN)+4)).
 -define(MAX_TOMBSTONE_SIZE, ?TOMBSTONE2_SIZE).
 
 -define(OFFSETFIELD_V1,  64).

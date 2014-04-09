@@ -905,15 +905,15 @@ expiry_grace_time(Opts) -> to_lower_grace_time_bound(get_opt(expiry_grace_time, 
 
 is_tombstone(?TOMBSTONE) ->
     true;
-is_tombstone(<<?TOMBSTONE2_STR, _FileId:32, _Offset:64>>) ->
+is_tombstone(<<?TOMBSTONE2_STR, _FileId:32>>) ->
     true;
 is_tombstone(_) ->
     false.
 
 tombstone_context(?TOMBSTONE) ->
     undefined;
-tombstone_context(<<?TOMBSTONE2_STR, FileId:32, Offset:64>>) ->
-    {FileId, Offset};
+tombstone_context(<<?TOMBSTONE2_STR, FileId:32>>) ->
+    {FileId};
 tombstone_context(_) ->
     no_tombstone.
 
@@ -1194,7 +1194,7 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                             % Full merge, so safe to drop tombstone
                             State
                     end;
-                {OldFileId, _OldOffset} ->
+                {OldFileId} ->
                     % Tombstone has info on deleted value
                     case sets:is_element(OldFileId,
                                          State#mstate.input_file_ids) of
@@ -1466,11 +1466,9 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     State3 = wrap_write_file(State2),
                     do_put(Key, Value, State3, Retries - 1, already_exists);
                     
-                #bitcask_entry{file_id=OldFileId, offset=OldOffset}
+                #bitcask_entry{file_id=OldFileId}
                   when OldFileId < WriteFileId ->
-                    PrevTombstone = <<?TOMBSTONE2_STR,
-                                      OldFileId:32,
-                                      OldOffset:64>>,
+                    PrevTombstone = <<?TOMBSTONE2_STR, OldFileId:32>>,
                     {ok, WriteFile1, _, _} =
                         bitcask_fileops:write(WriteFile0, Key, PrevTombstone,
                                               Tstamp),
@@ -1493,8 +1491,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     do_put(Key, Value, State3, Retries - 1, already_exists);
                 #bitcask_entry{tstamp=OldTstamp, file_id=OldFileId,
                                offset=OldOffset} ->
-                    Tombstone = <<?TOMBSTONE2_STR, OldFileId:32,
-                                  OldOffset:64>>,
+                    Tombstone = <<?TOMBSTONE2_STR, OldFileId:32>>,
                     {ok, WriteFile2, _, _} =
                         bitcask_fileops:write(State2#bc_state.write_file,
                                               Key, Tombstone, Tstamp),
