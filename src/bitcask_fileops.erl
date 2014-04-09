@@ -132,11 +132,12 @@ open_file(Filename, append) ->
                     file:delete(Filename),
                     {error, enoent};
                 {ok, Ofs} ->
-                    debug("File offset ~s ~p\n", [Filename, Ofs]),
                     case reopen_hintfile(Filename) of
                         {error, enoent} ->
                             bitcask_io:file_close(FD),
-                            file:delete(Filename),
+                            {error, enoent};
+                        {undefined, _} ->
+                            bitcask_io:file_close(FD),
                             {error, enoent};
                         {HintFD, HintCRC} ->
                             {ok,
@@ -164,10 +165,11 @@ open_file(Filename, readonly) ->
     end.
 
 % Re-open hintfile for appending.
+-spec reopen_hintfile(string() | #filestate{}) ->
+    {HintFD::port() | undefined, CRC :: non_neg_integer()}.
 reopen_hintfile(Filename) ->
     case  (catch open_hint_file(Filename, [])) of
         couldnt_open_hintfile ->
-            debug("Could not reopen hintfile for ~s\n", [Filename]),
             {undefined, 0};
         HintFD ->
             HintFilename = hintfile_name(Filename),
@@ -175,35 +177,35 @@ reopen_hintfile(Filename) ->
             HintSize = HintI#file_info.size,
             case bitcask_io:file_position(HintFD, HintSize) of
                 {ok, 0} ->
-                    debug("Sizes ~p ~p\n", [HintSize, 0]),
                     bitcask_io:file_close(HintFD),
                     file:delete(HintFilename),
                     {error, enoent};
-                {ok, FileSize} ->
-                    debug("Re-opening hintfile for ~s. Size = ~p\n",
-                              [Filename, FileSize]),
-                    case bitcask_io:file_position(HintFD,
-                                                  {eof, -?HINT_RECORD_SZ}) of
-                        {ok, _} ->
-                            case read_crc(HintFD) of
-                                error ->
-                                    {undefined, 0};
-                                HintCRC ->
-                                    debug("Read CRC ~p\n", [HintCRC]),
-                                    bitcask_io:file_position(HintFD,
-                                                             {eof, -?HINT_RECORD_SZ}),
-                                    bitcask_io:file_truncate(HintFD),
-                                    {HintFD, HintCRC}
-                            end;
-                        _ ->
-                            {undefined, 0}
-                    end
+                {ok, _FileSize} ->
+                    prepare_hintfile_for_append(HintFD)
             end
     end.
 
-debug(_Msg, _Args) ->
-    %erlang:display([Msg, Args]).
-    ok.
+% Removes the final CRC record so more records can be added to the file.
+-spec prepare_hintfile_for_append(HintFD :: port()) ->
+    {HintFD :: port() | undefined, CRC :: non_neg_integer()}.
+prepare_hintfile_for_append(HintFD) ->
+    case bitcask_io:file_position(HintFD,
+                                  {eof, -?HINT_RECORD_SZ}) of
+        {ok, _} ->
+            case read_crc(HintFD) of
+                error ->
+                    bitcask_io:file_close(HintFD),
+                    {undefined, 0};
+                HintCRC ->
+                    bitcask_io:file_position(HintFD,
+                                             {eof, -?HINT_RECORD_SZ}),
+                    bitcask_io:file_truncate(HintFD),
+                    {HintFD, HintCRC}
+            end;
+        _ ->
+            bitcask_io:file_close(HintFD),
+            {undefined, 0}
+    end.
 
 %% @doc Use when done writing a file.  (never open for writing again)
 -spec close(#filestate{} | fresh | undefined) -> ok.
@@ -237,7 +239,6 @@ close_hintfile(State = #filestate { hintfd = HintFd, hintcrc = HintCRC }) ->
     %% an older version of bitcask will just reject the record at the end of the
     %% hintfile and otherwise work normally.
     Iolist = hintfile_entry(<<>>, 0, 0, ?MAXOFFSET_V2, HintCRC),
-    debug("Writing final CRC for ~s ~p\n", [State#filestate.filename, HintCRC]),
     ok = bitcask_io:file_write(HintFd, Iolist),
     bitcask_io:file_sync(HintFd),
     bitcask_io:file_close(HintFd),

@@ -647,7 +647,7 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
     _ = [begin
              ok = bitcask_fileops:sync(TFile),
              ok = bitcask_fileops:close(TFile)
-         end || TFile <- State#mstate.tombstone_write_files],
+         end || TFile <- State1#mstate.tombstone_write_files],
 
     %% Close the original input files, schedule them for deletion,
     %% close keydirs, and release our lock
@@ -1195,7 +1195,7 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                             State
                     end;
                 {OldFileId, _OldOffset} ->
-                % Tombstone has info on deleted value
+                    % Tombstone has info on deleted value
                     case sets:is_element(OldFileId,
                                          State#mstate.input_file_ids) of
                         true ->
