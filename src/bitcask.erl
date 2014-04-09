@@ -1027,14 +1027,14 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
                 _:Detail ->
                     {error, {purge_setuid_or_init_scan, Detail}}
             after
-                case Lock of
-                    ?POLL_FOR_MERGE_LOCK_PSEUDOFAILURE ->
-                        ok;
-                    {error, _} = Error ->
-                        Error;
-                    _ ->
-                        ok = bitcask_lockops:release(Lock)
-                end
+                _ = case Lock of
+                        ?POLL_FOR_MERGE_LOCK_PSEUDOFAILURE ->
+                            ok;
+                        {error, _} = Error ->
+                            Error;
+                        _ ->
+                            ok = bitcask_lockops:release(Lock)
+                    end
             end,
 
             case ScanResult of
