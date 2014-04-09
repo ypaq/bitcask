@@ -130,7 +130,7 @@ open_file(Filename, append) ->
                 {ok, 0} ->
                     % File was deleted and we just opened a new one, undo.
                     bitcask_io:file_close(FD),
-                    file:delete(Filename),
+                    _ = file:delete(Filename),
                     {error, enoent};
                 {ok, Ofs} ->
                     case reopen_hintfile(Filename) of
@@ -167,7 +167,7 @@ open_file(Filename, readonly) ->
 
 % Re-open hintfile for appending.
 -spec reopen_hintfile(string() | #filestate{}) ->
-    {HintFD::port() | undefined, CRC :: non_neg_integer()}.
+    {error, enoent} | {HintFD::port() | undefined, CRC :: non_neg_integer()}.
 reopen_hintfile(Filename) ->
     case  (catch open_hint_file(Filename, [])) of
         couldnt_open_hintfile ->
@@ -179,7 +179,7 @@ reopen_hintfile(Filename) ->
             case bitcask_io:file_position(HintFD, HintSize) of
                 {ok, 0} ->
                     bitcask_io:file_close(HintFD),
-                    file:delete(HintFilename),
+                    _ = file:delete(HintFilename),
                     {error, enoent};
                 {ok, _FileSize} ->
                     prepare_hintfile_for_append(HintFD)
