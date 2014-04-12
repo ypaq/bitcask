@@ -1210,9 +1210,16 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                                 {TFile,
                                  State2 = #mstate{tombstone_write_files=TFiles}} ->
                                     % Original file still around, append to it
-                                    {ok, TFile2, _, _} =
+                                    {ok, TFile2, _, TSize} =
                                         bitcask_fileops:write(TFile, K, V,
                                                               Tstamp),
+                                    ok = bitcask_nifs:update_fstats(
+                                           State#mstate.live_keydir,
+                                           OldFileId, Tstamp,
+                                           _LiveKeys = 0,
+                                           _TotalKeysIncr = 1,
+                                           _LiveIncr = 0,
+                                           _TotalIncr = TSize),
                                     TFiles2 = lists:keyreplace(
                                                 TFile#filestate.filename,
                                                 #filestate.filename,
@@ -1492,10 +1499,13 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                 #bitcask_entry{tstamp=OldTstamp, file_id=OldFileId,
                                offset=OldOffset} ->
                     Tombstone = <<?TOMBSTONE2_STR, OldFileId:32>>,
-                    {ok, WriteFile2, _, _} =
+                    {ok, WriteFile2, _, TSize} =
                         bitcask_fileops:write(State2#bc_state.write_file,
                                               Key, Tombstone, Tstamp),
-
+                    ok = bitcask_nifs:update_fstats(
+                           State2#bc_state.keydir,
+                           bitcask_fileops:file_tstamp(WriteFile2), Tstamp,
+                           0, 1, 0, TSize),
                     case bitcask_nifs:keydir_remove(State2#bc_state.keydir,
                                                     Key, OldTstamp, OldFileId,
                                                     OldOffset) of
@@ -2769,5 +2779,33 @@ update_tstamp_stats_test() ->
     after
         bitcask_time:test__clear_fudge()
     end.
+
+total_byte_stats_test() ->
+    Dir = "/tmp/bc.total.byte.stats",
+    B = init_dataset(Dir, [read_write, {max_file_size, 1}], []),
+    [begin
+         case Op of
+             {del, K} ->
+                 bitcask:delete(B, K);
+             {K, V} ->
+                 bitcask:put(B, K, V)
+         end
+     end ||
+         Op <- [{<<"k1">>, <<"1">>},
+                {<<"k2">>, <<"2">>},
+                {del, <<"k1">>},
+                {<<"k1">>, <<"3">>},
+                {<<"k2">>, <<"4">>}]],
+    {_KCount, FStats} = summary_info(B),
+    Files1 = lists:sort([{File, Size}
+                         || #file_status{filename=File,
+                                         total_bytes=Size} <- FStats]),
+    ExpFiles1 =
+        [{Dir ++ "/1.bitcask.data", 2 + 1 + ?HEADER_SIZE},
+         {Dir ++ "/2.bitcask.data", 2 + 1 + ?HEADER_SIZE},
+         {Dir ++ "/3.bitcask.data", 2 + ?TOMBSTONE2_SIZE + ?HEADER_SIZE},
+         {Dir ++ "/4.bitcask.data", 2 + 1 + ?HEADER_SIZE}],
+    ?assertEqual(ExpFiles1, Files1),
+    bitcask:close(B).
 
 -endif.

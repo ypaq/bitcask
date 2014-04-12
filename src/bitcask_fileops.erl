@@ -300,7 +300,7 @@ write(Filestate=#filestate{fd = FD, hintfd = HintFD,
     %% Store the full entry in the data file
     ok = bitcask_io:file_pwrite(FD, Offset, Bytes),
     %% Create and store the corresponding hint entry
-    TotalSz = KeySz + ValueSz + ?HEADER_SIZE,
+    TotalSz = iolist_size(Bytes),
     TombInt = case bitcask:is_tombstone(Value) of
                   true  -> 1;
                   false -> 0
@@ -313,7 +313,6 @@ write(Filestate=#filestate{fd = FD, hintfd = HintFD,
             ok = bitcask_io:file_write(HintFD, Iolist)
     end,
     %% Record our final offset
-    TotalSz = iolist_size(Bytes),
     HintCRC = erlang:crc32(HintCRC0, Iolist), % compute crc of hint
     {ok, Filestate#filestate{ofs = Offset + TotalSz,
                              hintcrc = HintCRC,
