@@ -136,7 +136,7 @@ check_fstats(Ref, Expect) ->
     ?assertEqual(Expect#m_fstats.live_keys, LiveCount),
     ?assertEqual(Expect#m_fstats.live_bytes, LiveBytes),
     ?assertEqual(Expect#m_fstats.total_keys, TotalCount),
-    ?assertEqual(Expect#m_fstats.total_bytes, TotalBytes).
+    ?assert(Expect#m_fstats.total_bytes =< TotalBytes).
 
 check_model(Ref, Model) ->
     F = fun({K, deleted}) ->

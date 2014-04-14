@@ -860,8 +860,15 @@ summary_info(Ref) ->
 %% ===================================================================
 
 summarize(Dirname, {FileId, LiveCount, TotalCount, LiveBytes, TotalBytes, OldestTstamp, NewestTstamp}) ->
+    LiveRatio =
+        case TotalCount > 0 of
+            true ->
+                LiveCount / TotalCount;
+            false ->
+                0
+        end,
     #file_status { filename = bitcask_fileops:mk_filename(Dirname, FileId),
-                   fragmented = trunc((1 - LiveCount/TotalCount) * 100),
+                   fragmented = trunc((1 - LiveRatio) * 100),
                    dead_bytes = TotalBytes - LiveBytes,
                    total_bytes = TotalBytes,
                    oldest_tstamp = OldestTstamp,
@@ -1203,7 +1210,7 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                                            State#mstate.live_keydir,
                                            OldFileId, Tstamp,
                                            _LiveKeys = 0,
-                                           _TotalKeysIncr = 1,
+                                           _TotalKeysIncr = 0,
                                            _LiveIncr = 0,
                                            _TotalIncr = TSize),
                                     TFiles2 = lists:keyreplace(
@@ -1495,7 +1502,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     ok = bitcask_nifs:update_fstats(
                            State2#bc_state.keydir,
                            bitcask_fileops:file_tstamp(WriteFile2), Tstamp,
-                           0, 1, 0, TSize),
+                           0, 0, 0, TSize),
                     case bitcask_nifs:keydir_remove(State2#bc_state.keydir,
                                                     Key, OldTstamp, OldFileId,
                                                     OldOffset) of
