@@ -89,7 +89,7 @@
                   input_file_ids :: set(),
                   tombstone_write_files :: [#filestate{}],
                   out_file :: 'fresh' | #filestate{},
-                  partial :: boolean(),
+                  merge_coverage :: prefix | partial | full,
                   live_keydir :: reference(),
                   del_keydir :: reference(),
                   expiry_time :: integer(),
@@ -527,10 +527,22 @@ merge(Dirname, Opts, {FilesToMerge0, ExpiredFiles0}) ->
 %% Inner merge function, assumes that bitcask is running and all files exist.
 merge1(_Dirname, _Opts, [], []) ->
     ok;
-merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
+merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
     %% Test to see if this is a complete or partial merge
-    Partial = not(lists:usort(readable_files(Dirname)) == 
-                  lists:usort(FilesToMerge)),
+    ReadableFiles = lists:usort(readable_files(Dirname) -- ExpiredFiles),
+    FilesToMerge = lists:usort(FilesToMerge0 -- ExpiredFiles),
+    MergeCoverage =
+        case FilesToMerge == ReadableFiles of
+            true ->
+                full;
+            false ->
+                case lists:prefix(FilesToMerge, ReadableFiles) of
+                    true ->
+                        prefix;
+                    false ->
+                        partial
+                end
+        end,
     
     KT = get_key_transform(get_opt(key_transform, Opts)),
 
@@ -601,7 +613,7 @@ merge1(Dirname, Opts, FilesToMerge, ExpiredFiles) ->
                       input_file_ids = InFileIds,
                       tombstone_write_files = [],
                       out_file = fresh,  % will be created when needed
-                      partial = Partial,
+                      merge_coverage = MergeCoverage,
                       live_keydir = LiveKeyDir,
                       del_keydir = DelKeyDir,
                       expiry_time = expiry_time(Opts),
@@ -689,9 +701,56 @@ needs_merge(Ref) ->
                                    [Err])
     end,
 
+    #bc_state{dirname=Dirname} = State,
     %% Update state with live files
     put_state(Ref, State#bc_state { read_files = LiveFiles }),
+    case explicit_merge_files(Dirname) of
+        [] ->
+            run_merge_triggers(State, Summary);
+        MergeFiles ->
+            {true, {MergeFiles, []}}
+    end.
 
+%% Reads the list of files to merge from a text file if present.
+%% The file will be deleted if it doesn't contain unmerged files.
+-spec explicit_merge_files(Dir :: string()) -> list(string()).
+explicit_merge_files(Dirname) ->
+    MergeListFile = filename:join(Dirname, "merge.txt"),
+    case read_lines(MergeListFile) of
+        [] ->
+            case filelib:is_regular(MergeListFile) of
+                true ->
+                    error_logger:error_msg("Invalid merge input file ~s,"
+                                           " deleting", MergeListFile),
+                    _ = file:delete(MergeListFile),
+                    [];
+                false ->
+                    []
+            end;
+        MergeList0 ->
+            MergeList = [filename:join(Dirname, binary_to_list(Line))
+                         || Line <- MergeList0],
+            AllFiles = sets:from_list(readable_files(Dirname)),
+            FinalList = [F || F <- MergeList, sets:is_element(F, AllFiles)],
+            case FinalList of
+                [] ->
+                    _ = file:delete(MergeListFile),
+                    [];
+                _ ->
+                    FinalList
+            end
+    end.
+
+read_lines(Filename) ->
+    case file:read_file(Filename) of
+        {ok, Bin} ->
+            Lines0 = binary:split(Bin, [<<"\n">>, <<"\r">>, <<"\r\n">>]),
+            [Line || Line <- Lines0, Line /= <<>>];
+        _ ->
+            []
+    end.
+
+run_merge_triggers(State, Summary) ->
     %% Triggers that would require a merge:
     %%
     %% frag_merge_trigger - Any file exceeds this % fragmentation
@@ -1116,6 +1175,7 @@ list_data_files(Dirname, WritingFile, MergingFile) ->
     %% reverse sort that list and extract the fully-qualified filename.
     Files1 = bitcask_fileops:data_file_tstamps(Dirname),
     Files2 = bitcask_fileops:data_file_tstamps(Dirname),
+    % TODO: Remove crazy
     if Files1 == Files2 ->
             %% No race, Files1 is a stable list.
             [F || {_Tstamp, F} <- lists:sort(Files1),
@@ -1172,19 +1232,19 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
             % First tombstone seen for this key during this merge
             case tombstone_context(V) of
                 undefined ->
-                % Version 1 tombstone, no info on deleted value
+                    % Version 1 tombstone, no info on deleted value
                     % Not in keydir and not already deleted.
                     % Remember we deleted this already during this merge.
                     ok = bitcask_nifs:keydir_put(State#mstate.del_keydir, K,
                                                  FileId, 0, Offset, Tstamp,
                                                  bitcask_time:tstamp()),
-                    case State#mstate.partial of
-                        true ->
+                    case State#mstate.merge_coverage of
+                        partial ->
                             % Merging only some files, forward tombstone
                             inner_merge_write(K, V, Tstamp, FileId, Offset,
                                               State);
-                        false ->
-                            % Full merge, so safe to drop tombstone
+                        _ ->
+                            % Full or prefix merge, so safe to drop tombstone
                             State
                     end;
                 {OldFileId} ->
@@ -1236,12 +1296,12 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                     ok = bitcask_nifs:keydir_put(State#mstate.del_keydir, K,
                                                  FileId, 0, Offset, Tstamp,
                                                  bitcask_time:tstamp()),
-                    case State#mstate.partial of
-                        true ->
+                    case State#mstate.merge_coverage of
+                        partial ->
                             inner_merge_write(K, V, Tstamp, FileId, Offset,
                                               State);
-                        false ->
-                            % Drop the tombstone
+                        _ ->
+                            % Full or prefix merge, safe to drop the tombstone
                             State
                     end;
                 false ->
