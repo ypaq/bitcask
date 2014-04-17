@@ -717,37 +717,67 @@ needs_merge(Ref) ->
 explicit_merge_files(Dirname) ->
     MergeListFile = filename:join(Dirname, "merge.txt"),
     case read_lines(MergeListFile) of
-        [] ->
+        {error, ReadErr} ->
             case filelib:is_regular(MergeListFile) of
                 true ->
                     error_logger:error_msg("Invalid merge input file ~s,"
-                                           " deleting", MergeListFile),
+                                           " deleting : ~p",
+                                           [MergeListFile, ReadErr]),
                     _ = file:delete(MergeListFile),
                     [];
                 false ->
                     []
             end;
-        MergeList0 ->
-            MergeList = [filename:join(Dirname, binary_to_list(Line))
-                         || Line <- MergeList0],
-            AllFiles = sets:from_list(readable_files(Dirname)),
-            FinalList = [F || F <- MergeList, sets:is_element(F, AllFiles)],
-            case FinalList of
+        {ok, MergeList} ->
+            case next_merge_batch(Dirname, MergeList) of
                 [] ->
                     _ = file:delete(MergeListFile),
                     [];
-                _ ->
-                    FinalList
+                MergeBatch ->
+                    MergeBatch
             end
     end.
 
+-spec next_merge_batch(Dir::string(), Files::[binary()]) -> [binary()].
+next_merge_batch(Dir, Files) ->
+    AllFiles = sets:from_list(readable_files(Dir)),
+    Batch =
+        lists:foldl(fun(<<>>, []=Acc) ->
+                            % Drop leading empty lines
+                            Acc;
+                       (<<>>, [_|_]=Acc) ->
+                            % Stop at first empty line after some files
+                            {batch, Acc};
+                       (F0, Acc) when is_list(Acc) ->
+                            % Collect existing files
+                            F = filename:join(Dir, binary_to_list(F0)),
+                            case sets:is_element(F, AllFiles) of
+                                true ->
+                                    [F|Acc];
+                                false ->
+                                    Acc
+                            end;
+                       (_, {batch, _}=Acc) ->
+                            % Ignore the rest
+                            Acc
+                    end, [], Files),
+    BatchFiles =
+        case Batch of
+            {batch, List} ->
+                List;
+            List ->
+                List
+        end,
+    lists:reverse(BatchFiles).
+
+-spec read_lines(string()) -> {ok, [binary()]} | {error, _}.
 read_lines(Filename) ->
     case file:read_file(Filename) of
         {ok, Bin} ->
-            Lines0 = binary:split(Bin, [<<"\n">>, <<"\r">>, <<"\r\n">>]),
-            [Line || Line <- Lines0, Line /= <<>>];
-        _ ->
-            []
+            LineSeps = [<<"\n">>, <<"\r">>, <<"\r\n">>],
+            {ok, binary:split(Bin, LineSeps, [global])};
+        Err ->
+            Err
     end.
 
 run_merge_triggers(State, Summary) ->
@@ -2870,5 +2900,42 @@ total_byte_stats_test() ->
          {Dir ++ "/4.bitcask.data", 2 + 1 + ?HEADER_SIZE}],
     ?assertEqual(ExpFiles1, Files1),
     bitcask:close(B).
+
+merge_batch_test() ->
+    Dir = "/tmp/bc.merge.batch",
+    % Create a valid Bitcask dir with files 10-20 present only
+    DataSet = [{integer_to_binary(N), <<"data">>} || N <- lists:seq(1,20)],
+    close(init_dataset(Dir, [{max_file_size, 1}], DataSet)),
+    BFile =
+        fun(N) ->
+                filename:join(Dir, integer_to_list(N) ++ ".bitcask.data")
+        end,
+    % Simple transform for compact test data representation below
+    % Numbers -> binary bitcask file name, with 0 -> <<>>
+    MData =
+        fun(L) ->
+                [case N of
+                     blank -> "\n";
+                     _ -> integer_to_list(N)++".bitcask.data\n"
+                 end || N <- L]
+        end,
+    % Number to full path bitcask file transform
+    ExpData = fun(L) -> [BFile(N) || N <- L] end,
+    ok = file:write_file(filename:join(Dir, "merge.txt"),
+                         MData([7, 9, 10, blank, 12, 13, blank, 14])),
+    B = bitcask:open(Dir),
+    try
+        ?assertEqual({true, {ExpData([7, 9, 10]), []}}, bitcask:needs_merge(B)),
+        ok = bitcask:merge(Dir, [], [BFile(7), BFile(9)]),
+        ?assertEqual({true, {ExpData([10]), []}}, bitcask:needs_merge(B)),
+        ok = bitcask:merge(Dir, [], [BFile(10)]),
+        ?assertEqual({true, {ExpData([12, 13]), []}}, bitcask:needs_merge(B)),
+        ok = bitcask:merge(Dir, [], [BFile(12)]),
+        ?assertEqual({true, {ExpData([13]), []}}, bitcask:needs_merge(B)),
+        ok = bitcask:merge(Dir, [], [BFile(13)]),
+        ?assertEqual({true, {ExpData([14]), []}}, bitcask:needs_merge(B))
+    after
+        bitcask:close(B)
+    end.
 
 -endif.
