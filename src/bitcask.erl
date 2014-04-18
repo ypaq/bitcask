@@ -1984,10 +1984,12 @@ fold_visits_unfrozen_test_() ->
      ?_test(fold_visits_unfrozen_test(true))].
 
 slow_worker() ->
+    ?debugMsg("slow_worker started, waiting for owner/values\n"),
     {Owner, Values} =
         receive
             {owner, O, Vs} -> {O, Vs}
         end,
+    ?debugMsg("slow worker got owner/values\n"),
     SlowCollect = fun(K, V, Acc) ->
                           if Acc == [] ->
                                   Owner ! i_have_started_folding,
@@ -2003,8 +2005,10 @@ slow_worker() ->
                           end,
                           [{K, V} | Acc]
                   end,
+    ?debugMsg("slow worker will open\n"),
     B = bitcask:open("/tmp/bc.test.unfrozenfold"),
     Owner ! ready,
+    ?debugMsg("slow worker will fold\n"),
     L = fold(B, SlowCollect, [], -1, -1, false),
     case Values =:= lists:sort(L) of 
         true ->
@@ -2012,8 +2016,9 @@ slow_worker() ->
         false ->
             Owner ! {sad, L}
     end,
-    %%?debugFmt("slow worker finished~n", []),
-    bitcask:close(B).
+    ?debugFmt("slow worker finished~n", []),
+    bitcask:close(B),
+    ?debugMsg("slow worker closed bitcask\n").
     
 finish_worker_loop(Pid) ->
     receive
@@ -2028,15 +2033,17 @@ finish_worker_loop(Pid) ->
 
 
 fold_visits_unfrozen_test(RollOver) ->
-    %%?debugFmt("rollover is ~p~n", [RollOver]),
+    ?debugFmt("rollover is ~p~n", [RollOver]),
     Cask = "/tmp/bc.test.unfrozenfold",
     os:cmd("rm -r "++Cask),
 
     bitcask_time:test__set_fudge(1),
     B = init_dataset(Cask, default_dataset()),
+    ?debugMsg("data set ready\n"),
     try
         Pid = spawn(fun slow_worker/0),
         Pid ! {owner, self(), default_dataset()},
+        ?debugMsg("spawned slow worker, sent owner/values\n"),
         %% If checking file rollover, update the state so the next write will 
         %% trigger a 'wrap' return.
         case RollOver of
@@ -2046,12 +2053,14 @@ fold_visits_unfrozen_test(RollOver) ->
             _ ->
                 ok
         end,
+        ?debugMsg("before receive\n"),
         receive
             i_have_started_folding ->
                 ok
         after 10*1000 ->
                 error(timeout_should_never_happen)
         end,
+        ?debugMsg("after receive\n"),
 
         %% Until time independent epochs are merged, the fold timestamp
         %% is used to determine the snapshot, which has a 1 second resolution.
@@ -2068,6 +2077,7 @@ fold_visits_unfrozen_test(RollOver) ->
                              [{K, V} | Acc]
                      end,
 
+        ?debugMsg("<-"),
         %% Unfreeze the keydir, waiting until complete
         case finish_worker_loop(Pid) of
             done -> ok;
@@ -2075,12 +2085,13 @@ fold_visits_unfrozen_test(RollOver) ->
                 ?assertEqual(default_dataset(), lists:sort(L))
         end,
 
+        ?debugMsg("Final fold\n"),
         %% Check we see the updated fold
         L2 = fold(B, CollectAll, [], -1, -1, false),
         ?assertEqual([{<<"k2">>,<<"v2-2">>},
                       {<<"k3">>,<<"v3">>},
-                      {<<"k4">>,<<"v4">>}], lists:sort(L2))
-        %%?debugFmt("got past the asserts??~n", [])
+                      {<<"k4">>,<<"v4">>}], lists:sort(L2)),
+        ?debugFmt("got past the asserts??~n", [])
     after
         bitcask:close(B),
         bitcask_time:test__clear_fudge()
