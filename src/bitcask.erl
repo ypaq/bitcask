@@ -87,6 +87,7 @@
                   max_file_size :: integer(),
                   input_files :: [#filestate{}],
                   input_file_ids :: set(),
+                  min_file_id :: non_neg_integer(),
                   tombstone_write_files :: [#filestate{}],
                   out_file :: 'fresh' | #filestate{},
                   merge_coverage :: prefix | partial | full,
@@ -601,6 +602,8 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
                          end, InFiles2),
     InFileIds = sets:from_list([bitcask_fileops:file_tstamp(InFile)
                                || InFile <- InFiles]),
+    MinFileId = lists:min([bitcask_fileops:file_tstamp(F) ||
+                           F <- ReadableFiles]),
 
     %% Initialize the other keydirs we need.
     {ok, DelKeyDir} = bitcask_nifs:keydir_new(),
@@ -611,6 +614,7 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
                       max_file_size = get_opt(max_file_size, Opts),
                       input_files = InFiles,
                       input_file_ids = InFileIds,
+                      min_file_id = MinFileId,
                       tombstone_write_files = [],
                       out_file = fresh,  % will be created when needed
                       merge_coverage = MergeCoverage,
@@ -981,6 +985,8 @@ expiry_grace_time(Opts) -> to_lower_grace_time_bound(get_opt(expiry_grace_time, 
 
 is_tombstone(?TOMBSTONE) ->
     true;
+is_tombstone(<<?TOMBSTONE1_STR, _FileId:32>>) ->
+    true;
 is_tombstone(<<?TOMBSTONE2_STR, _FileId:32>>) ->
     true;
 is_tombstone(_) ->
@@ -988,8 +994,10 @@ is_tombstone(_) ->
 
 tombstone_context(?TOMBSTONE) ->
     undefined;
+tombstone_context(<<?TOMBSTONE1_STR, FileId:32>>) ->
+    {before, FileId};
 tombstone_context(<<?TOMBSTONE2_STR, FileId:32>>) ->
-    {FileId};
+    {at, FileId};
 tombstone_context(_) ->
     no_tombstone.
 
@@ -1270,14 +1278,23 @@ merge_single_entry(K, V, Tstamp, FileId, {_, _, Offset, _} = Pos, State) ->
                                                  bitcask_time:tstamp()),
                     case State#mstate.merge_coverage of
                         partial ->
+                            V2 = <<?TOMBSTONE1_STR, FileId:32>>,
                             % Merging only some files, forward tombstone
-                            inner_merge_write(K, V, Tstamp, FileId, Offset,
+                            inner_merge_write(K, V2, Tstamp, FileId, Offset,
                                               State);
                         _ ->
                             % Full or prefix merge, so safe to drop tombstone
                             State
                     end;
-                {OldFileId} ->
+                {before, OldFileId} ->
+                    case State#mstate.min_file_id > OldFileId of
+                        true ->
+                            State;
+                        false ->
+                            inner_merge_write(K, V, Tstamp, FileId, Offset,
+                                              State)
+                    end;
+                {at, OldFileId} ->
                     % Tombstone has info on deleted value
                     case sets:is_element(OldFileId,
                                          State#mstate.input_file_ids) of
@@ -1398,7 +1415,7 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
                 %% file. It's possible that someone else may have written
                 %% a newer value whilst we were processing ... and if
                 %% they did, we need to undo our write here.
-                case bitcask_nifs:keydir_put(State#mstate.live_keydir, K,
+                case bitcask_nifs:keydir_put(State1#mstate.live_keydir, K,
                                              OutFileId,
                                              Size, Offset, Tstamp,
                                              bitcask_time:tstamp(),
@@ -1410,8 +1427,14 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
                         O
                 end;
            true ->
-                case bitcask_nifs:keydir_get(State#mstate.live_keydir, K) of
+                case bitcask_nifs:keydir_get(State1#mstate.live_keydir, K) of
                     not_found ->
+                        % Update timestamp and total bytes stats
+                        ok = bitcask_nifs:update_fstats(
+                               State1#mstate.live_keydir,
+                               OutFileId,
+                               Tstamp,
+                               0, 0, 0, Size),
                         % Still not there, tombstone write is cool
                         Outfile;
                     #bitcask_entry{} ->
