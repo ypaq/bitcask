@@ -738,7 +738,7 @@ explicit_merge_files(Dirname) ->
             end
     end.
 
--spec next_merge_batch(Dir::string(), Files::[binary()]) -> [binary()].
+-spec next_merge_batch(Dir::string(), Files::[binary()]) -> [string()].
 next_merge_batch(Dir, Files) ->
     AllFiles = sets:from_list(readable_files(Dir)),
     Batch =
