@@ -2962,6 +2962,7 @@ merge_batch_test() ->
                          MData([7, 9, 10, blank, 12, 13, blank, 14])),
     B = bitcask:open(Dir),
     try
+        ?debugMsg2("Begin asserts\n"),
         ?assertEqual({true, {ExpData([7, 9, 10]), []}}, bitcask:needs_merge(B)),
         ok = bitcask:merge(Dir, [], [BFile(7), BFile(9)]),
         ?assertEqual({true, {ExpData([10]), []}}, bitcask:needs_merge(B)),
@@ -2970,7 +2971,8 @@ merge_batch_test() ->
         ok = bitcask:merge(Dir, [], [BFile(12)]),
         ?assertEqual({true, {ExpData([13]), []}}, bitcask:needs_merge(B)),
         ok = bitcask:merge(Dir, [], [BFile(13)]),
-        ?assertEqual({true, {ExpData([14]), []}}, bitcask:needs_merge(B))
+        ?assertEqual({true, {ExpData([14]), []}}, bitcask:needs_merge(B)),
+        ?debugMsg2("End asserts\n")
     after
         bitcask:close(B)
     end.
