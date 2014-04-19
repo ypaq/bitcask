@@ -34,6 +34,7 @@
          iterator/3, iterator_next/1, iterator_release/1,
          merge/1, merge/2, merge/3,
          needs_merge/1,
+         needs_merge/2,
          is_empty_estimate/1,
          status/1]).
 
@@ -671,6 +672,10 @@ consider_for_merge(FragTrigger, DeadBytesTrigger, ExpirationGraceTime) ->
 
 -spec needs_merge(reference()) -> {true, {[string()], [string()]}} | false.
 needs_merge(Ref) ->
+    needs_merge(Ref, []).
+
+-spec needs_merge(reference(), proplist:proplist()) -> {true, {[string()], [string()]}} | false.
+needs_merge(Ref, Opts) ->
     State = get_state(Ref),
     {_KeyCount, Summary} = summary_info(Ref),
 
@@ -708,12 +713,45 @@ needs_merge(Ref) ->
     #bc_state{dirname=Dirname} = State,
     %% Update state with live files
     put_state(Ref, State#bc_state { read_files = LiveFiles }),
-    case explicit_merge_files(Dirname) of
-        [] ->
-            run_merge_triggers(State, Summary);
-        MergeFiles ->
-            {true, {MergeFiles, []}}
+    Result0 =
+        case explicit_merge_files(Dirname) of
+            [] ->
+                run_merge_triggers(State, Summary);
+            MergeFiles ->
+                {true, {MergeFiles, []}}
+        end,
+    MaxMergeSize = proplists:get_value(max_merge_size, Opts),
+    case Result0 of
+        false ->
+            false;
+        {true, {MergeFiles0, ExpiredFiles}} ->
+            {true, {cap_size(MergeFiles0, MaxMergeSize), ExpiredFiles}}
     end.
+
+-spec cap_size([string()], integer()) -> [string()].
+cap_size(Files, MaxSize) ->
+    Result0 =
+        lists:foldl(fun(_, {finished, Acc}) ->
+                            {finished, Acc};
+                       (F, {AccSize, InFiles}) ->
+                            case bitcask_fileops:read_file_info(F) of
+                                {ok, #file_info{size=Size}}
+                                  when Size+AccSize > MaxSize ->
+                                    {finished, {AccSize, InFiles}};
+                                {ok, #file_info{size=Size}} ->
+                                    {Size+AccSize, [F|InFiles]};
+                                _ -> % Can't get size, assume zero (deleted)
+                                    {AccSize, [F|InFiles]}
+                            end
+                    end, {0, []}, Files),
+    Result1 =
+        case Result0 of
+            {finished, {_, List}} ->
+                List;
+            {_, List} ->
+                List
+        end,
+    lists:reverse(Result1).
 
 %% Reads the list of files to merge from a text file if present.
 %% The file will be deleted if it doesn't contain unmerged files.
@@ -2957,6 +2995,41 @@ merge_batch_test() ->
         ?assertEqual({true, {ExpData([13]), []}}, bitcask:needs_merge(B)),
         ok = bitcask:merge(Dir, [], [BFile(13)]),
         ?assertEqual({true, {ExpData([14]), []}}, bitcask:needs_merge(B))
+    after
+        bitcask:close(B)
+    end.
+
+max_merge_size_test() ->
+    Dir = "/tmp/bc.max.merge.size",
+    % Generate 10 objects roughly 100 bytes each, one per file
+    DataSet = [{<<N:32>>, <<0:100/integer-unit:8>>} || N <- lists:seq(1, 10)],
+    B0 = init_dataset(Dir, [{max_file_size, 1}], DataSet),
+    _ = [ok = bitcask:delete(B0, <<N:32>>) || N <- lists:seq(1,10)],
+    ok = bitcask:close(B0),
+    AllFiles = readable_files(Dir),
+    ?assert(length(AllFiles) > 10),
+    % Write explicit merge file with every file
+    ok = file:write_file(filename:join(Dir, "merge.txt"),
+                         [[filename:basename(F), <<"\n">>] || F <- AllFiles]),
+    SizeFn = fun(L) ->
+                     lists:foldl(fun(F, Acc) ->
+                                         {ok, #file_info{size=S}} =
+                                         file:read_file_info(F),
+                                         Acc + S
+                                 end, 0, L)
+             end,
+    B = bitcask:open(Dir),
+    ?assertEqual({true, {AllFiles, []}}, bitcask:needs_merge(B)),
+    try
+        MaxSizes = [0, 10, 100, 150, 250, 500],
+        [begin
+             {true, {Files, []}} =
+                 bitcask:needs_merge(B, [{max_merge_size, MaxSize}]),
+             Size = SizeFn(Files),
+             %?debugFmt("Size ~p, max size ~p : ~p\n", [Size, MaxSize, Files]),
+             ?assertEqual({Size, MaxSize, true},
+                          {Size, MaxSize, Size =< MaxSize})
+         end || MaxSize <- MaxSizes]
     after
         bitcask:close(B)
     end.
