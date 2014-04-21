@@ -452,16 +452,12 @@ file_tstamp(#filestate{tstamp=Tstamp}) ->
 file_tstamp(Filename) when is_list(Filename) ->
     list_to_integer(filename:basename(Filename, ".bitcask.data")).
 
--spec check_write(fresh | #filestate{}, binary(), binary()|tombstone, integer()) ->
+-spec check_write(fresh | #filestate{}, binary(), non_neg_integer(), integer()) ->
       fresh | wrap | ok.
-check_write(fresh, _Key, _Value, _MaxSize) ->
+check_write(fresh, _Key, _ValSize, _MaxSize) ->
     %% for the very first write, special-case
     fresh;
-check_write(#filestate { ofs = Offset }, Key, Value, MaxSize) ->
-    ValSize = case Value of
-                  tombstone -> ?TOMBSTONE2_SIZE;
-                  _ -> size(Value)
-              end,
+check_write(#filestate { ofs = Offset }, Key, ValSize, MaxSize) ->
     Size = ?HEADER_SIZE + size(Key) + ValSize,
     case (Offset + Size) > MaxSize of
         true ->

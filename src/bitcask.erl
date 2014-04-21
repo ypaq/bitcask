@@ -79,9 +79,12 @@
                    max_file_size :: integer(),  % Max. size of a written file
                    opts :: list(),           % Original options used to open the bitcask
                    key_transform :: function(),
-                   keydir :: reference(),
-                   read_write_p :: integer()    % integer() avoids atom -> NIF
-                  }).       % Key directory
+                   keydir :: reference(),       % Key directory
+                   read_write_p :: integer(),    % integer() avoids atom -> NIF
+                   % What tombstone style to write, for testing purposes only.
+                   % 0 = old style without file id, 2 = new style with file id
+                   tombstone_version :: 0 | 2
+                  }).
 
 -record(mstate, { dirname :: string(),
                   merge_lock :: reference(),
@@ -142,6 +145,9 @@ open(Dirname, Opts) ->
     %% Set the key transform for this cask
     KeyTransformFun = get_key_transform(get_opt(key_transform, Opts)),
 
+    %% Type of tombstone to write, for testing.
+    TombstoneVersion = get_opt(tombstone_version, Opts),
+
     %% Loop and wait for the keydir to come available.
     ReadWriteP = WritingFile /= undefined,
     ReadWriteI = case ReadWriteP of true  -> 1;
@@ -161,6 +167,7 @@ open(Dirname, Opts) ->
                                        opts = ExpOpts,
                                        keydir = KeyDir, 
                                        key_transform = KeyTransformFun,
+                                       tombstone_version = TombstoneVersion,
                                        read_write_p = ReadWriteI}),
             Ref;
         {error, Reason} ->
@@ -324,11 +331,9 @@ fold_keys(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
             true ->
                 Acc;
             false ->
-                TSize1 = ?TOMBSTONE_SIZE,
-                TSize2 = ?TOMBSTONE2_SIZE,
                 case BCEntry#bitcask_entry.total_sz -
                             (?HEADER_SIZE + size(Key)) of
-                    Ss when Ss == TSize1; Ss == TSize2 ->
+                    Ss when ?IS_TOMBSTONE_SIZE(Ss) ->
                         %% might be a deleted record, so check
                         case ?MODULE:get(Ref, Key) of
                             not_found when not SeeTombstonesP ->
@@ -1021,16 +1026,12 @@ to_lower_grace_time_bound(X) ->
 
 expiry_grace_time(Opts) -> to_lower_grace_time_bound(get_opt(expiry_grace_time, Opts)).
 
-is_tombstone(?TOMBSTONE) ->
-    true;
-is_tombstone(<<?TOMBSTONE1_STR, _FileId:32>>) ->
-    true;
-is_tombstone(<<?TOMBSTONE2_STR, _FileId:32>>) ->
+is_tombstone(<<?TOMBSTONE_PREFIX, _Rest/binary>>) ->
     true;
 is_tombstone(_) ->
     false.
 
-tombstone_context(?TOMBSTONE) ->
+tombstone_context(<<?TOMBSTONE0_STR>>) ->
     undefined;
 tombstone_context(<<?TOMBSTONE1_STR, FileId:32>>) ->
     {before, FileId};
@@ -1038,6 +1039,14 @@ tombstone_context(<<?TOMBSTONE2_STR, FileId:32>>) ->
     {at, FileId};
 tombstone_context(_) ->
     no_tombstone.
+
+-spec tombstone_size_for_version(0|1|2) -> non_neg_integer().
+tombstone_size_for_version(0) ->
+    ?TOMBSTONE0_SIZE;
+tombstone_size_for_version(1) ->
+    ?TOMBSTONE1_SIZE;
+tombstone_size_for_version(2) ->
+    ?TOMBSTONE2_SIZE.
 
 -ifdef(TEST).
 start_app() ->
@@ -1404,7 +1413,8 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
     %% See if it's time to rotate to the next file
     State1 =
         case bitcask_fileops:check_write(State#mstate.out_file,
-                                         K, V, State#mstate.max_file_size) of
+                                         K, size(V),
+                                         State#mstate.max_file_size) of
             wrap ->
                 %% Close the current output file
                 ok = bitcask_fileops:sync(State#mstate.out_file),
@@ -1579,7 +1589,14 @@ do_put(_Key, _Value, State, 0, LastErr) ->
     {{error, LastErr}, State};
 do_put(Key, Value, #bc_state{write_file = WriteFile} = State, 
        Retries, _LastErr) ->
-    case bitcask_fileops:check_write(WriteFile, Key, Value,
+    ValSize =
+        case Value of
+            tombstone ->
+                tombstone_size_for_version(State#bc_state.tombstone_version);
+            _ ->
+                size(Value)
+        end,
+    case bitcask_fileops:check_write(WriteFile, Key, ValSize,
                                      State#bc_state.max_file_size) of
         wrap ->
             %% Time to start a new write file. Note that we do not close the old
@@ -3033,5 +3050,44 @@ max_merge_size_test() ->
     after
         bitcask:close(B)
     end.
+
+% This verifies that legacy tombstones, which were not safe to drop on partial
+% merges are eventually dropped. They are first converted to version 1
+% tombstones on a merge. These contain a file id. When all files up to that one
+% have gone away, they become safe to drop.
+legacy_tombstones_test() ->
+    Dir = "/tmp/bc.legacy.tombstones",
+
+    % Data: 10 keys, delete those 10, write an extra one.
+    DataSet = [{<<N:32>>, <<0>>} || N <- lists:seq(1, 10)],
+    B0 = init_dataset(Dir, [{max_file_size, 1}], DataSet),
+    _ = [ok = bitcask:delete(B0, <<N:32>>) || N <- lists:seq(1,10)],
+    ok = bitcask:put(B0, <<11:32>>, <<0>>),
+    ok = bitcask:close(B0),
+    B = bitcask:open(Dir),
+
+    % Merge all but last file, which should generate 10 v1 tombstones
+    % For those first 10 values written and deleted
+    AllFiles = readable_files(Dir),
+    L1 = length(AllFiles),
+    AllButLast = lists:sublist(AllFiles, L1-1),
+    Last = lists:nth(L1, AllFiles),
+    ok = merge(Dir, [], AllButLast),
+
+    % Merge the files containing the v1 tombstones, skip the live one.
+    % Notice that this is not a "prefix" merge that would drop any kind of
+    % tombstone since we are skipping the first file.
+    AllFiles2 = readable_files(Dir),
+    ?assertEqual(hd(AllFiles2), Last),
+    AllButFirst = tl(AllFiles2),
+    ok = merge(Dir, [], AllButFirst),
+
+    % Now we should have the file with the only live object followed by 
+    % files with v1 tombstones. When merging those, since all of the original
+    % files containing the values and tombstones are gone, all v1 tombstones
+    % should be dropped, leaving only the lonely file with the live object.
+    AllFiles3 = readable_files(Dir),
+    bitcask:close(B),
+    ?assertEqual([Last], AllFiles3).
 
 -endif.
