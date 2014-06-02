@@ -1242,7 +1242,14 @@ init_keydir_scan_key_files(Dirname, KeyDir, KT, Count) ->
             _ ->
                 MaxSetuid = lists:max([bitcask_fileops:file_tstamp(F) ||
                                           F <- SetuidFiles]),
-                bitcask_nifs:increment_file_id(KeyDir, MaxSetuid)
+                _ = bitcask_nifs:increment_file_id(KeyDir, MaxSetuid),
+                ok
+        end,
+        case file:read_file_info(Dirname ++ "/" ++ ?MAX_FILEID_FILE) of
+            {ok, MaxI} ->
+                bitcask_nifs:increment_file_id(KeyDir, MaxI#file_info.size + 1);
+            _ ->
+                ok
         end
     catch _X:_Y ->
             error_msg_perhaps("scan_key_files: ~p ~p @ ~p\n",

@@ -79,6 +79,11 @@ create_file(DirName, Opts0, Keydir) ->
                 Filename = mk_filename(DirName, Newest),
                 ok = ensure_dir(Filename),
 
+                {{ok, MaxFH}, ?LINE} = {file:open(DirName ++ "/" ++ ?MAX_FILEID_FILE, [read,write,raw,binary]), ?LINE},
+                {ok, ?LINE} = {file:pwrite(MaxFH, Newest, <<1>>), ?LINE},
+                {ok, ?LINE} = {file:sync(MaxFH), ?LINE},
+                {ok, ?LINE} = {file:close(MaxFH), ?LINE},
+
                 %% Check for o_sync strategy and add to opts
                 FinalOpts = 
                     case bitcask:get_opt(sync_strategy, Opts) of
