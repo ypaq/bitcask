@@ -41,7 +41,6 @@
 -export([get_opt/2,
          get_filestate/2,
          is_tombstone/1]).
--export([has_pending_delete_bit/1]).                    % For EUnit tests
 
 -include_lib("kernel/include/file.hrl").
 -include("bitcask.hrl").
@@ -682,10 +681,22 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
     %% Close the original input files, schedule them for deletion,
     %% close keydirs, and release our lock
     bitcask_fileops:close_all(State#mstate.input_files ++ ExpiredFilesFinished),
-    {_, _, _, {IterGeneration, _, _, _}} = bitcask_nifs:keydir_info(LiveKeyDir),
-    FileNames = [F#filestate.filename || F <- State1#mstate.delete_files ++ ExpiredFilesFinished],
-    _ = [catch set_pending_delete_bit(F) || F <- FileNames],
-    bitcask_merge_delete:defer_delete(Dirname, IterGeneration, FileNames),
+    DeadIds0 = [begin
+		    _ = bitcask_fileops:delete(F),
+		    bitcask_fileops:file_tstamp(F)
+		end
+		|| F <- State1#mstate.delete_files ++ ExpiredFilesFinished],
+    DeadIds = lists:usort(DeadIds0),
+    case bitcask_nifs:keydir_trim_fstats(LiveKeyDir, DeadIds) of
+        {ok, _} ->
+            ok;
+        %% {ok, Warn} ->
+        %%     error_logger:info_msg("Trimmed ~p non-existent fstat entries ~p",
+        %%                           [Warn, DeadIds]);
+        Err ->
+            error_logger:error_msg("Error trimming fstats entries: ~p",
+                                   [Err])
+    end,
 
     %% Explicitly release our keydirs instead of waiting for GC
     bitcask_nifs:keydir_release(LiveKeyDir),
@@ -723,25 +734,8 @@ needs_merge(Ref, Opts) ->
 
     %% Close the dead files and accumulate a list for trimming their 
     %% fstats entries.
-    DeadIds0 = 
-        [begin
-             bitcask_fileops:close(F),
-             bitcask_fileops:file_tstamp(F)
-         end
+    _ = [bitcask_fileops:close(F)
          || F <- DeadFiles],
-    DeadIds = lists:usort(DeadIds0),
-
-    case bitcask_nifs:keydir_trim_fstats(State#bc_state.keydir, 
-                                         DeadIds) of
-        {ok, 0} ->
-            ok;
-        {ok, Warn} ->
-            error_logger:info_msg("Trimmed ~p non-existent fstat entries",
-                                  [Warn]);
-        Err ->
-            error_logger:error_msg("Error trimming fstats entries: ~p",
-                                   [Err])
-    end,
 
     #bc_state{dirname=Dirname} = State,
     %% Update state with live files
@@ -1178,17 +1172,10 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
             Lock = poll_for_merge_lock(Dirname),
             ScanResult =
             try
-                if ReadWriteModeP ->
-                        %% This purge will acquire the write lock
-                        %% prior to doing anything.
-                        purge_setuid_files(Dirname);
-                   true ->
-                        ok
-                end,
                 init_keydir_scan_key_files(Dirname, KeyDir, KT)
             catch
                 _:Detail ->
-                    {error, {purge_setuid_or_init_scan, Detail}}
+                    {error, {init_scan, Detail}}
             after
                 _ = case Lock of
                         ?POLL_FOR_MERGE_LOCK_PSEUDOFAILURE ->
@@ -1231,19 +1218,8 @@ init_keydir_scan_key_files(_Dirname, _Keydir, _KT, 0) ->
     {error, {init_keydir_scan_key_files, too_many_iterations}};
 init_keydir_scan_key_files(Dirname, KeyDir, KT, Count) ->
     try
-        {SortedFiles, SetuidFiles} = readable_and_setuid_files(Dirname),
-        _ = scan_key_files(SortedFiles, KeyDir, [], true, KT),
-        %% There may be a setuid data file that has a larger tstamp name than
-        %% any non-setuid data file.  Tell the keydir about it, so that we
-        %% don't try to reuse that tstamp name.
-        case SetuidFiles of
-            [] ->
-                ok;
-            _ ->
-                MaxSetuid = lists:max([bitcask_fileops:file_tstamp(F) ||
-                                          F <- SetuidFiles]),
-                bitcask_nifs:increment_file_id(KeyDir, MaxSetuid)
-        end
+        SortedFiles = readable_files(Dirname),
+        _ = scan_key_files(SortedFiles, KeyDir, [], true, KT)
     catch _X:_Y ->
             error_msg_perhaps("scan_key_files: ~p ~p @ ~p\n",
                               [_X, _Y, erlang:get_stacktrace()]),
@@ -1606,10 +1582,6 @@ out_of_date(State, Key, Tstamp, FileId, {_,_,Offset,_} = Pos,
 
 -spec readable_files(string()) -> [string()].  
 readable_files(Dirname) ->
-    {ReadableFiles, _SetuidFiles} = readable_and_setuid_files(Dirname),
-    ReadableFiles.
-
-readable_and_setuid_files(Dirname) ->
     %% Check the write and/or merge locks to see what files are currently
     %% being written to. Generate our list excepting those.
     WritingFile = bitcask_lockops:read_activefile(write, Dirname),
@@ -1617,8 +1589,7 @@ readable_and_setuid_files(Dirname) ->
 
     %% Filter out files with setuid bit set: they've been marked for
     %% deletion by an earlier *successful* merge.
-    Fs = [F || F <- list_data_files(Dirname, WritingFile, MergingFile)],
-    lists:partition(fun(F) -> not has_pending_delete_bit(F) end, Fs).
+    [F || F <- list_data_files(Dirname, WritingFile, MergingFile)].
 
 %% Internal put - have validated that the file is opened for write
 %% and looked up the state at this point
@@ -1783,64 +1754,6 @@ wrap_write_file(#bc_state{write_file = WriteFile} = State) ->
     catch
         error:{badmatch,Error} ->
             throw({unrecoverable, Error, State})
-    end.
-
-%% Versions of Bitcask prior to
-%% https://github.com/basho/bitcask/pull/156 used the setuid bit to
-%% indicate that the data file has been deleted logically and is
-%% waiting for a physical delete from the 'bitcask_merge_delete' server.
-%%
-%% However, with PR 156, we change the lifecycle of a .data file: it's
-%% possible to append tombstones during a merge to a file that is
-%% pending deletion.  If that happens, the file system will clear the
-%% setuid bit when the first append happens.  That's not good.
-%%
-%% Going forward, instead of using the setuid bit for pending delete
-%% status, we'll use the 8#001 execution permission bit.
-%% For backward compatibility, has_pending_delete_bit() will check for
-%% both the old pending bit, 8#40000 (setuid), as well as 8#0001.
-
-set_pending_delete_bit(File) ->
-    %% We're intentionally opinionated about pattern matching here.
-    {ok, FI} = bitcask_fileops:read_file_info(File),
-    NewFI = FI#file_info{mode = FI#file_info.mode bor 8#0001},
-    ok = bitcask_fileops:write_file_info(File, NewFI).
-
-has_pending_delete_bit(File) ->
-    try
-        {ok, FI} = bitcask_fileops:read_file_info(File),
-        FI#file_info.mode band 8#4001 /= 0
-    catch _:_ ->
-            false
-    end.
-
-purge_setuid_files(Dirname) ->
-    case bitcask_lockops:acquire(write, Dirname) of
-        {ok, WriteLock} ->
-            try
-                StaleFs = [F || F <- list_data_files(Dirname,
-                                                     undefined, undefined),
-                                has_pending_delete_bit(F)],
-                _ = [bitcask_fileops:delete(#filestate{filename = F}) ||
-                        F <- StaleFs],
-                if StaleFs == [] ->
-                        ok;
-                   true ->
-                        error_logger:info_msg("Deleted ~p stale merge input "
-                                              "files from ~p\n",
-                                              [length(StaleFs), Dirname])
-                end
-            catch
-                X:Y ->
-                    error_msg_perhaps("While deleting stale merge input "
-                                      "files from ~p: ~p ~p @ ~p\n",
-                                      [X, Y, erlang:get_stacktrace()])
-            after
-                bitcask_lockops:release(WriteLock)
-            end;
-        Else ->
-            error_logger:info_msg("Lock failed trying deleting stale merge "
-                                  "input files from ~p: ~p\n", [Dirname, Else])
     end.
 
 poll_for_merge_lock(Dirname) ->
@@ -2396,7 +2309,6 @@ expire_merge_test2() ->
     bitcask:close(M),
 
     %% With lazy merge file creation there will be no files.
-    ok = bitcask_merge_delete:testonly__delete_trigger(),
     0 = length(readable_files("/tmp/bc.test.mergeexpire")),
 
     %% Make sure all the data is present
@@ -2750,7 +2662,7 @@ truncated_merge_test2() ->
     M = bitcask:open(Dir),
     ok = merge(Dir),
     bitcask:close(M),
-    ok = bitcask_merge_delete:testonly__delete_trigger(),
+    timer:sleep(100),
 
     %% Verify we've now only got one file
     1 = length(readable_files(Dir)),

@@ -142,7 +142,6 @@ cleanup(_) ->
 prop_bitcask() ->
     ?FORALL(Cmds, commands(?MODULE),
             begin
-		bitcask_merge_delete:testonly__delete_trigger(),
                 [] = os:cmd("rm -rf " ++ ?TEST_DIR),
                 {H,{_State, StateData}, Res} = run_commands(?MODULE,Cmds),
                 case (StateData#state.bitcask) of
