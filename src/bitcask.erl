@@ -369,6 +369,27 @@ fold(State, Fun, Acc0) ->
     SeeTombstonesP = get_opt(fold_tombstones, State#bc_state.opts) /= undefined,
     fold(State, Fun, Acc0, MaxAge, MaxPuts, SeeTombstonesP).
 
+find_stable_file_list(State) ->
+    CurrentEpoch = bitcask_nifs:keydir_get_epoch(State#bc_state.keydir),
+
+    case open_fold_files(State#bc_state.dirname, ?OPEN_FOLD_RETRIES) of
+	{ok, Files} ->
+	    %% io:fwrite(standard_error, "fold files ~p~n", [Files]),
+	    ok;
+	{error, Reason} ->
+	    Files = [],
+	    {error, Reason}
+    end,
+    case bitcask_nifs:keydir_get_epoch(State#bc_state.keydir) of
+	CurrentEpoch ->
+	    PendingEpoch = pending_epoch(State#bc_state.keydir),
+	    FoldEpoch = min(CurrentEpoch, PendingEpoch),		
+	    {Files, FoldEpoch};
+	_ ->
+	    [bitcask_fileops:close(F) || F <- Files],
+	    find_stable_file_list(State)
+    end.
+
 %% @doc fold over all K/V pairs in a bitcask datastore specifying max age/updates of
 %% the frozen keystore.
 %% Fun is expected to take F(K,V,Acc0) -> Acc
@@ -380,51 +401,58 @@ fold(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) when is_reference(Ref)->
     fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP);
 fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
     KT = State#bc_state.key_transform,
-    FrozenFun = 
+
+    FrozenFun =
         fun() ->
-                CurrentEpoch = bitcask_nifs:keydir_get_epoch(State#bc_state.keydir),
-                PendingEpoch = pending_epoch(State#bc_state.keydir),
-                FoldEpoch = min(CurrentEpoch, PendingEpoch),
-                case open_fold_files(State#bc_state.dirname, ?OPEN_FOLD_RETRIES) of
-                    {ok, Files} ->
-                        ExpiryTime = expiry_time(State#bc_state.opts),
-                        SubFun = fun(K0,V,TStamp,{_FN,FTS,Offset,_Sz},Acc) ->
-                                         K = KT(K0),
-                                         case (TStamp < ExpiryTime) of
-                                             true ->
-                                                 Acc;
-                                             false ->
-                                                 case bitcask_nifs:keydir_get(
-                                                        State#bc_state.keydir, K,
-                                                        FoldEpoch) of
-                                                     not_found ->
-                                                         Acc;
-                                                     E when is_record(E, bitcask_entry) ->
-                                                         case
-                                                             Offset =:= E#bitcask_entry.offset
-                                                             andalso
-                                                             TStamp =:= E#bitcask_entry.tstamp
-                                                             andalso
-                                                             FTS =:= E#bitcask_entry.file_id of
-                                                             false ->
-                                                                 Acc;
-                                                             true when SeeTombstonesP ->
-                                                                 Fun({tombstone, K},V,Acc);
-                                                             true when not SeeTombstonesP ->
-                                                                 case is_tombstone(V) of
-                                                                     true ->
-                                                                         Acc;
-                                                                     false ->
-                                                                         Fun(K,V,Acc)
-                                                                 end
-                                                         end
-                                                 end
-                                         end
-                                 end,
-                        subfold(SubFun,Files,Acc0);
-                    {error, Reason} ->
-                        {error, Reason}
-                end
+		{Files, FoldEpoch} = find_stable_file_list(State),
+		ExpiryTime = expiry_time(State#bc_state.opts),
+		SubFun = fun(K0,V,TStamp,{_FN,FTS,Offset,_Sz},Acc) ->
+				 K = KT(K0),
+				 case (TStamp < ExpiryTime) of
+				     true ->
+ 					 %% io:fwrite(standard_error, "expired ~p ~n",
+					 %% 	   [K]),
+					 Acc;
+				     false ->
+					 %% io:fwrite(standard_error, "seeing ~p ~n",
+					 %% 	   [K]),
+					 case bitcask_nifs:keydir_get(
+						State#bc_state.keydir, K,
+						FoldEpoch) of
+					     not_found ->
+						 %% io:fwrite(standard_error, "not found ~p ~n",
+						 %% 	   [K]),
+						 Acc;
+					     E when is_record(E, bitcask_entry) ->
+						 case
+						     Offset =:= E#bitcask_entry.offset
+						     andalso
+						     TStamp =:= E#bitcask_entry.tstamp
+						     andalso
+						     FTS =:= E#bitcask_entry.file_id of
+						     false ->
+							 %% io:fwrite(standard_error, "record diff ~p ~n"
+							 %% 	   "o ~p ~p t ~p ~p f ~p ~p ~n",
+							 %% 	   [K, Offset, E#bitcask_entry.offset,
+							 %% 	    TStamp, E#bitcask_entry.tstamp,
+							 %% 	    FTS, E#bitcask_entry.file_id]),
+							 Acc;
+						     true when SeeTombstonesP ->
+							 Fun({tombstone, K},V,Acc);
+						     true when not SeeTombstonesP ->
+							 case is_tombstone(V) of
+							     true ->
+								 Acc;
+							     false ->
+								 %% io:fwrite(standard_error, "using ~p ~n",
+								 %% 	   [K]),
+								 Fun(K,V,Acc)
+							 end
+						 end
+					 end
+				 end
+			 end,
+		subfold(SubFun,Files,Acc0)
         end,
     KeyDir = State#bc_state.keydir,
     bitcask_nifs:keydir_frozen(KeyDir, FrozenFun, MaxAge, MaxPut).
@@ -473,6 +501,8 @@ open_files([Filename | Rest], Acc) ->
 subfold(_SubFun,[],Acc) ->
     Acc;
 subfold(SubFun,[FD | Rest],Acc0) ->
+    %% io:fwrite(standard_error, "folding ~p ~n",
+    %% 	      [FD#filestate.filename]),
     Acc2 = try bitcask_fileops:fold(FD, SubFun, Acc0) of
                Acc1 ->
                    Acc1
@@ -687,6 +717,7 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
 		end
 		|| F <- State1#mstate.delete_files ++ ExpiredFilesFinished],
     DeadIds = lists:usort(DeadIds0),
+    %% io:fwrite(standard_error, "deleted ~p~n", [DeadIds]),
     case bitcask_nifs:keydir_trim_fstats(LiveKeyDir, DeadIds) of
         {ok, _} ->
             ok;
