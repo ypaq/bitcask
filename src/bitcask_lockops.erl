@@ -21,7 +21,7 @@
 %% -------------------------------------------------------------------
 -module(bitcask_lockops).
 
--export([acquire/2,
+-export([acquire/2, acquire/3,
          release/1,
          delete_stale_lock/2,
          read_activefile/2,
@@ -32,6 +32,19 @@
 -endif.
 
 -type lock_types() :: merge | write | create.
+
+%% @doc blocking wrapper with retries count
+-spec acquire(Type::lock_types(), Dirname::string(), Retries::integer()) -> 
+		     {ok, reference()} | {error, any()}.
+acquire(Type, Dirname, Retries) ->
+    case acquire(Type, Dirname) of
+	{ok, Lock} ->
+	    {ok, Lock};
+	{error, locked} ->
+	    acquire(Type, Dirname, Retries - 1);
+	{error, Reason} ->
+	    {error, Reason}
+    end.
 
 %% @doc Attempt to lock the specified directory with a specific type of lock
 %% (merge or write).

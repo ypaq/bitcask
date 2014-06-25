@@ -382,11 +382,20 @@ fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
     KT = State#bc_state.key_transform,
     FrozenFun = 
         fun() ->
+		case bitcask_lockops:acquire(fold, State#bc_state.dirname, 1000) of
+		    {ok, FoldLock} ->
+			ok;
+		    {error, FLReason} ->
+			FoldLock = undefined,
+			throw({error, {fold_locked, FLReason, State#bc_state.dirname}})
+		end,
+
                 CurrentEpoch = bitcask_nifs:keydir_get_epoch(State#bc_state.keydir),
                 PendingEpoch = pending_epoch(State#bc_state.keydir),
                 FoldEpoch = min(CurrentEpoch, PendingEpoch),
                 case open_fold_files(State#bc_state.dirname, ?OPEN_FOLD_RETRIES) of
                     {ok, Files} ->
+			ok = bitcask_lockops:release(FoldLock),
                         ExpiryTime = expiry_time(State#bc_state.opts),
                         SubFun = fun(K0,V,TStamp,{_FN,FTS,Offset,_Sz},Acc) ->
                                          K = KT(K0),
@@ -423,6 +432,7 @@ fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
                                  end,
                         subfold(SubFun,Files,Acc0);
                     {error, Reason} ->
+			ok = bitcask_lockops:release(FoldLock),
                         {error, Reason}
                 end
         end,
@@ -678,6 +688,14 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
              ok = bitcask_fileops:close(TFile)
          end || TFile <- State1#mstate.tombstone_write_files],
 
+    case bitcask_lockops:acquire(fold, Dirname, 1000) of
+        {ok, FoldLock} ->
+            ok;
+        {error, FLReason} ->
+            FoldLock = undefined,
+            throw({error, {fold_locked, FLReason, Dirname}})
+    end,
+
     %% Close the original input files, schedule them for deletion,
     %% close keydirs, and release our lock
     bitcask_fileops:close_all(State#mstate.input_files ++ ExpiredFilesFinished),
@@ -697,6 +715,8 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
             error_logger:error_msg("Error trimming fstats entries: ~p",
                                    [Err])
     end,
+
+    ok = bitcask_lockops:release(FoldLock),
 
     %% Explicitly release our keydirs instead of waiting for GC
     bitcask_nifs:keydir_release(LiveKeyDir),
