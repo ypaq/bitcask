@@ -386,6 +386,19 @@ fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
                 CurrentEpoch = bitcask_nifs:keydir_get_epoch(State#bc_state.keydir),
                 PendingEpoch = pending_epoch(State#bc_state.keydir),
                 FoldEpoch = min(CurrentEpoch, PendingEpoch),
+                case application:get_env(bitcask, test_master_pid) of
+                    {ok, MasterPid} ->
+                        ?debugFmt("Got master pid of ~p", [MasterPid]),
+                        ?debugMsg("Ready to open fold files, notifying test"),
+                        MasterPid ! {ready_to_open_fold_files, self()},
+                        receive
+                            open_fold_files ->
+                                ok
+                        end;
+                    _ ->
+                        ok
+                end,
+
                 case open_fold_files(State#bc_state.dirname, ?OPEN_FOLD_RETRIES) of
                     {ok, Files} ->
                         ExpiryTime = expiry_time(State#bc_state.opts),
