@@ -2702,7 +2702,58 @@ testhelper_keydir_count(B) ->
     KD = (get_state(B))#bc_state.keydir,
     {KeyCount,_,_,_,_} = bitcask_nifs:keydir_info(KD),
     KeyCount.
-    
+
+% Test key expiration. Three batches of keys are written one
+% (simulated) second apart, then as time advances (again, fake) each batch
+% will disappear as it expires.
+expired_keys_test_() ->
+    {setup,
+     fun() ->
+             bitcask_time:test__set_fudge(1)
+     end,
+     fun(_) ->
+             bitcask_time:test__clear_fudge()
+     end,
+     [fun() ->
+              Dir = "/tmp/bc.expired.keys/",
+              KF = VF = fun(N) -> integer_to_binary(N) end,
+              NK1 = 3, NK2 = 6, NK3 = 9,
+              KVF = fun(S,E) ->
+                            [{KF(N), VF(N)} || N <- lists:seq(S,E)]
+                    end,
+
+              Data = KVF(1, NK1),
+              B = init_dataset(Dir, [{expiry_secs, 2}], Data),
+              bitcask_time:test__incr_fudge(1),
+              put_kvs(B, KVF(NK1+1, NK2)),
+              bitcask_time:test__incr_fudge(1),
+              put_kvs(B, KVF(NK2+1, NK3)),
+
+              TestOK = fun(S,E) ->
+                               [?assertEqual({ok, VF(N)},
+                                             bitcask:get(B, KF(N)))
+                                || N <- lists:seq(S, E)]
+                       end,
+              TestGone = fun(S, E) ->
+                               [?assertEqual(not_found,
+                                             bitcask:get(B, KF(N)))
+                                || N <- lists:seq(S, E)]
+                       end,
+              try
+                  TestOK(1, NK3),
+                  bitcask_time:test__incr_fudge(1),
+                  TestGone(1, NK1),
+                  TestOK(NK1+1, NK3),
+                  bitcask_time:test__incr_fudge(1),
+                  TestGone(1, NK2),
+                  TestOK(NK2+1, NK3),
+                  bitcask_time:test__incr_fudge(1),
+                  TestGone(1, NK3)
+              after
+                  bitcask:close(B)
+              end
+     end]}.
+
 expire_keydir_test_() ->
     {timeout, 60, fun expire_keydir_test2/0}.
 
