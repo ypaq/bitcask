@@ -206,6 +206,27 @@ typedef struct
     char *   key;
 } bitcask_keydir_entry_proxy;
 
+// These correspond with entry layout in memory
+#define ENTRY_FILE_ID_OFFSET 0
+#define ENTRY_TOTAL_SZ_OFFSET 4
+#define ENTRY_EPOCH_OFFSET 8
+#define ENTRY_OFFSET_OFFSET 16
+#define ENTRY_TIMESTAMP_OFFSET 24
+#define ENTRY_NEXT_OFFSET 28
+#define ENTRY_KEY_SIZE_OFFSET 32
+#define ENTRY_KEY_OFFSET 34
+
+#define PAGE_SIZE 4096
+
+typedef struct
+{
+    uint32_t file_id;
+    uint32_t total_sz;
+    uint64_t epoch;
+    uint64_t offset;
+    uint32_t tstamp;
+} return_entry_t;
+
 #define MAX_TIME ((uint32_t)-1)
 #define MAX_EPOCH ((uint64_t)-1)
 #define MAX_SIZE ((uint32_t)-1)
@@ -219,34 +240,54 @@ typedef khash_t(fstats) fstats_hash_t;
 
 typedef struct
 {
-    // The hash where entries are usually stored. It may contain
-    // regular entries or entry lists created during keyfolding.
-    entries_hash_t* entries;
-    // Hash used when it's not possible to update entries without
-    // resizing it, which would break ongoing keyfolder on it.
-    // It can only contain regular entries, not entry lists.
-    entries_hash_t* pending;
-    fstats_hash_t*  fstats;
-    uint64_t      epoch;
-    uint64_t      key_count;
-    uint64_t      key_bytes;
-    uint32_t      biggest_file_id;
-    unsigned int  refcount;
-    unsigned int  keyfolders;
-    uint64_t      newest_folder;  // Epoch for newest folder
-    uint64_t      iter_generation;
-    char          iter_mutation;         // Mutation while iterating?
-    uint64_t      sweep_last_generation; // iter_generation of last sibling sweep
-    khiter_t      sweep_itr;             // iterator for sibling sweep
-    uint64_t      pending_updated;
-    uint64_t      pending_start_time;  // UNIX epoch seconds (since 1970)
-    uint64_t      pending_start_epoch;
-    ErlNifPid*    pending_awaken; // processes to wake once pending merged into entries
-    unsigned int  pending_awaken_count;
-    unsigned int  pending_awaken_size;
     ErlNifMutex*  mutex;
-    char          is_ready;
-    char          name[0];
+    void *        data;
+    uint32_t      next;
+    uint32_t      prev_free;
+    uint32_t      next_free;
+} page_t;
+
+typedef struct
+{
+    page_t   page;
+    uint32_t size;
+    uint32_t swap_idx;
+    uint32_t dead_bytes;
+} memory_page_t;
+
+struct swap_array_struct
+{
+    uint32_t                size;
+    struct swap_array_t *   next;
+    page_t *                pages;
+};
+
+typedef struct swap_array_struct swap_array_t;
+
+typedef struct
+{
+    ErlNifMutex*      mutex;
+    void *            page_buffer;
+    memory_page_t*    memory_pages;
+    uint32_t          num_pages;
+    memory_page_t*    free_list_head;
+    swap_array_t *    swap_pages;
+    uint32_t          num_swap_pages;
+    ErlNifMutex*      swap_grow_mutex;
+
+    fstats_hash_t*    fstats;
+    uint64_t          epoch;
+    uint64_t          key_count;
+    uint64_t          key_bytes;
+    uint32_t          biggest_file_id;
+    unsigned int      refcount;
+    unsigned int      keyfolders;
+    uint64_t          newest_folder;  // Epoch for newest folder
+    uint64_t          iter_generation;
+    uint64_t          sweep_last_generation; // iter_generation of last sibling sweep
+    khiter_t          sweep_itr;             // iterator for sibling sweep
+    char              is_ready;
+    char              name[0];
 } bitcask_keydir;
 
 typedef struct
@@ -672,6 +713,11 @@ ERL_NIF_TERM bitcask_nifs_set_pending_delete(ErlNifEnv* env, int argc,
     {
         return enif_make_badarg(env);
     }
+}
+
+static hash_key(char * key, int key_sz)
+{
+    return MURMUR_HASH(key, key_sz, 42);
 }
 
 static khint_t keydir_entry_hash(bitcask_keydir_entry* entry)
@@ -1511,6 +1557,143 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
         return enif_make_badarg(env);
     }
 }
+
+static int is_page_free(page_t * page)
+{
+    return page->size == 0;
+}
+
+static page_t * get_swap_page(uint32_t idx, swap_array_t * swap_pages)
+{
+    if (idx < swap_pages->size)
+    {
+        return swap_pages->pages[idx];
+    }
+
+    // assert(idx > swap_pages->size)
+    // We never call this function with out of bounds indices
+    return get_swap_page(idx - swap_pages->size, swap_pages->next);
+}
+
+typedef struct
+{
+    int                 found;
+    uint32_t            offset;
+    int                 num_pages;
+    page_t **           pages;
+    memory_page_t **    mem_pages;
+    return_entry_t      result;
+    uint32_t            next;
+} scan_result_t;
+
+static void* scan_get_field(
+        scan_result_t * result,
+        int field_offset)
+{
+    int chain_ofs = result->offset + field_offset;
+    int idx = chain_ofs / PAGE_SIZE;
+    int ofs = chain_ofs % PAGE_SIZE;
+    return pages[idx]->data + ofs;
+}
+
+static uint64_t scan_get_epoch(scan_result_t * result)
+{
+    return *((uint64_t*)scan_get_field(result, ENTRY_EPOCH_OFFSET));
+}
+
+static void scan_pages(
+        char * key,
+        int key_size,
+        uint64_t epoch,
+        page_t * page,
+        mem_page_t * mem_page,
+        scan_result_t * result)
+{
+// TODO it!
+}
+
+// Returns 1 if should keep going
+static int scan_next(
+        scan_result_t * result,
+        uint64_t        epoch)
+{
+
+
+}
+
+static void scan_result_to_entry(
+        scan_result_t * scan_result,
+        return_entry_t * return_entry)
+{
+    return_entry->epoch    = scan_get_epoch(scan_result);
+    return_entry->file_id  = scan_get_file_id(scan_result);
+    return_entry->total_sz = scan_get_total_sz(scan_result);
+    return_entry->offset   = scan_get_offset(scan_result);
+    return_entry->tstamp   = scan_get_timestamp(scan_result);
+}
+
+static void unlock_pages(int num_pages, page_t ** pages)
+{
+    while(num_pages--)
+    {
+        enif_mutex_unlock((*pages++)->mutex);
+    }
+}
+
+static void free_scan_result(scan_result_t * scan_result)
+{
+    unlock_pages(scan_result->num_pages, scan_result->pages);
+}
+
+static int keydir_get(
+        bitcask_keydir *    keydir,
+        char *              key,
+        int                 key_size,
+        uint64_t            epoch,
+        return_entry_t *    result)
+{
+    uint32_t base_idx;
+    memory_page_t * base_page;
+    page_t * first_page;
+   
+    base_idx = hash_key(key, key_size) % keydir->num_pages;
+    base_page = keydir->memory_pages[base_idx];
+
+    enif_mutex_lock(base_page->mutex);
+    if (base_page->swap_idx)
+    {
+        first_page = get_swap_page(base_page->swap_idx, keydir->swap_pages);
+        enif_mutex_lock(first_page->mutex);
+        enif_mutex_unlock(base_page->mutex);
+    }
+    else if (is_page_free(base_page))
+    {
+        enif_mutex_unlock(base_page->mutex);
+        return 0;
+    }
+    else
+    {
+        first_page = &base_page->page;
+    }
+
+    scan_result_t scan_result;
+    scan_pages(key, key_size, epoch, first_page, base_page, &scan_result);
+
+    if (scan_result.found)
+    {
+        while (scan_next(&scan_result, epoch))
+            ;
+        scan_result_to_entry(&scan_result, return_entry);
+        free_scan_result(&scan_result);
+        return 1;
+    }
+    else
+    {
+        free_scan_result(&scan_result);
+        return 0;
+    }
+}
+
 
 /* int erts_printf(const char *, ...); */
 
