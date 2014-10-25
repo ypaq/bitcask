@@ -1580,6 +1580,7 @@ typedef struct
     int                 found;
     uint32_t            offset;
     int                 num_pages;
+    int                 page_array_size;
     page_t **           pages;
     memory_page_t **    mem_pages;
     return_entry_t      result;
@@ -1601,18 +1602,123 @@ static uint64_t scan_get_epoch(scan_result_t * result)
     return *((uint64_t*)scan_get_field(result, ENTRY_EPOCH_OFFSET));
 }
 
+#define SCAN_INITIAL_PAGE_ARRAY_SIZE 64
+
 static void scan_pages(
         char * key,
         int key_size,
         uint64_t epoch,
         page_t * page,
         mem_page_t * mem_page,
+        int data_size,
         scan_result_t * result)
 {
-// TODO it!
+    page_t ** pages;
+    mem_page_t ** mem_pages;
+
+
+    result->found = 0;
+    result->offset = 0;
+    result->num_pages = 1;
+    result->page_array_size = SCAN_INITIAL_PAGE_ARRAY_SIZE;
+    result->pages =
+        (page_t**)malloc(sizeof(page_t*)*result->page_array_size);
+    result->mem_pages =
+        (page_t**)malloc(sizeof(mem_page_t*)*result->page_array_size);
+    result->pages[0] = page;
+    result->mem_pages[0] = mem_page;
+
+    lock_pages_to_scan_next_entry(result);
+
+    for(;;)
+    {
+        if (scan_cmp_keys(key, key_size, result))
+        {   
+            // found it.
+            return;
+        }
+
+        entry_size = ENTRY_FILE_KEY_OFFSET + scan_get_key_size(result);
+        result->offset += entry_size;
+
+        if (result->offset >= data_size)
+        {
+            // No more entries
+            return;
+        }
+
+        lock_pages_to_scan_next_entry(result);
+    }
 }
 
-// Returns 1 if should keep going
+/* 
+ * Ensures that we have all pages containing data for the entry we are
+ * pointing to.
+ */
+static void lock_pages_to_scan_entry(scan_result_t * scan)
+{
+    memory_page_t * next_mem_page;
+    page_t * next_page;
+    int needed_pages = (scan->offset + ENTRY_KEY_OFFSET) / PAGE_SIZE + 1;
+    uint16_t key_size;
+
+    if (needed_pages > scan->num_pages)
+    {
+        add_pages_to_scan(scan, 1);
+    }
+
+    key_size = scan_get_key_size(result);
+    needed_pages = (scan->offset + ENTRY_KEY_OFFSET + key_size) / PAGE_SIZE;
+    add_pages_to_scan(scan, needed_pages - scan->num_pages);
+}
+
+static void add_pages_to_scan(
+        bitcask_keydir * keydir,
+        scan_result_t * scan,
+        int n)
+{
+    uint32_t next;
+    page_t * page;
+    mem_page_t * mem_page;
+
+    while(n--)
+    {
+        next = scan->pages[scan->num_pages-1]->next;
+        if (next < keydir->num_pages)
+        {
+            // memory page
+            mem_page = keydir->pages[next];
+            page = mem_page->page;
+        }
+        else
+        {
+            // swap page
+            mem_page = (mem_page_t*)0;
+            page = get_swap_page(next - keydir->num_pages,
+                    keydir->swap_pages, next);
+        }
+
+        enif_mutex_lock(page->mutex);
+
+        if (scan->num_pages > scan->page_array_size)
+        {
+            scan->page_array_size *= 2;
+            scan->pages = (page_t**)realloc(scan->pages,
+                    sizeof(page_t*)*scan->page_array_size);
+            scan->mem_pages = (mem_page_t**)realloc(scan->mem_pages,
+                    sizeof(mem_page_t*)*scan->page_array_size);
+        }
+
+        scan->pages[scan->num_pages] = page;
+        scan->mem_pages[scan->num_pages] = mem_page;
+        ++scan->num_pages;
+    }
+}
+
+/*
+ * Skips to next entry in a multi-entry chain if there is any.
+ * Returns 1 if should keep going
+ */
 static int scan_next(
         scan_result_t * result,
         uint64_t        epoch)
@@ -1621,6 +1727,10 @@ static int scan_next(
 
 }
 
+/*
+ * Populate return entry fields from scan data.
+ * It handles entries split across page boundaries.
+ */
 static void scan_result_to_entry(
         scan_result_t * scan_result,
         return_entry_t * return_entry)
