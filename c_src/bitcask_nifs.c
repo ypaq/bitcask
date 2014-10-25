@@ -218,6 +218,8 @@ typedef struct
 
 #define PAGE_SIZE 4096
 
+#define SCAN_INITIAL_PAGE_ARRAY_SIZE 64
+
 typedef struct
 {
     uint32_t file_id;
@@ -275,14 +277,14 @@ typedef struct
     uint32_t          num_swap_pages;
     ErlNifMutex*      swap_grow_mutex;
 
-    fstats_hash_t*    fstats;
     uint64_t          epoch;
+    uint64_t          min_epoch;
     uint64_t          key_count;
     uint64_t          key_bytes;
+    fstats_hash_t*    fstats;
     uint32_t          biggest_file_id;
     unsigned int      refcount;
     unsigned int      keyfolders;
-    uint64_t          newest_folder;  // Epoch for newest folder
     uint64_t          iter_generation;
     uint64_t          sweep_last_generation; // iter_generation of last sibling sweep
     khiter_t          sweep_itr;             // iterator for sibling sweep
@@ -1577,18 +1579,22 @@ static page_t * get_swap_page(uint32_t idx, swap_array_t * swap_pages)
 
 typedef struct
 {
+    uint32_t            base_idx;
     int                 found;
     uint32_t            offset;
     int                 num_pages;
+    // Consider initial fixed size array and only allocate dynamically
+    // if we need more. Size it so this is uncommon.
+    page_t              pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE]
+    page_t              mem_pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE]
     int                 page_array_size;
     page_t **           pages;
     memory_page_t **    mem_pages;
-    return_entry_t      result;
     uint32_t            next;
-} scan_result_t;
+} scan_iter_t;
 
 static void* scan_get_field(
-        scan_result_t * result,
+        scan_iter_t * result,
         int field_offset)
 {
     int chain_ofs = result->offset + field_offset;
@@ -1597,65 +1603,78 @@ static void* scan_get_field(
     return pages[idx]->data + ofs;
 }
 
-static uint64_t scan_get_epoch(scan_result_t * result)
+static uint64_t scan_get_epoch(scan_iter_t * result)
 {
     return *((uint64_t*)scan_get_field(result, ENTRY_EPOCH_OFFSET));
 }
 
-#define SCAN_INITIAL_PAGE_ARRAY_SIZE 64
+static uint16_t scan_get_key_size(scan_iter_t * result)
+{
+    return *((uint16_t*)scan_get_field(result, ENTRY_KEY_SIZE_OFFSET));
+}
+
+static void init_scan_iterator(scan_iter_t & scan_iter,
+        uint32_t base_idx,
+        page_t * first_page,
+        mem_page_t * first_mem_page)
+{
+    scan_iter->base_idx = base_idx;
+    scan_iter->found = 0;
+    scan_iter->offset = 0;
+    scan_iter->num_pages = 1;
+    scan_iter->page_array_size = SCAN_INITIAL_PAGE_ARRAY_SIZE;
+    scan_iter->pages = scan_iter->pages0;
+    scan_iter->mem_pages = scan_iter->mem_pages0;
+    scan_iter->pages[0] = first_page;
+    scan_iter->mem_pages[0] = first_mem_page;
+}
 
 static void scan_pages(
         char * key,
         int key_size,
         uint64_t epoch,
-        page_t * page,
-        mem_page_t * mem_page,
         int data_size,
-        scan_result_t * result)
+        scan_iter_t * scan_iter)
 {
-    page_t ** pages;
-    mem_page_t ** mem_pages;
-
-
-    result->found = 0;
-    result->offset = 0;
-    result->num_pages = 1;
-    result->page_array_size = SCAN_INITIAL_PAGE_ARRAY_SIZE;
-    result->pages =
-        (page_t**)malloc(sizeof(page_t*)*result->page_array_size);
-    result->mem_pages =
-        (page_t**)malloc(sizeof(mem_page_t*)*result->page_array_size);
-    result->pages[0] = page;
-    result->mem_pages[0] = mem_page;
-
-    lock_pages_to_scan_next_entry(result);
+    if (scan_iter->mem_pages[0]->size == 0)
+    {
+        return;
+    }
 
     for(;;)
     {
-        if (scan_cmp_keys(key, key_size, result))
+        lock_pages_to_scan_entry(scan_iter);
+
+        if (scan_cmp_keys(key, key_size, scan_iter))
         {   
-            // found it.
+            scan_iter->found = 1;
             return;
         }
 
-        entry_size = ENTRY_FILE_KEY_OFFSET + scan_get_key_size(result);
-        result->offset += entry_size;
+        // Point offset to next entry
+        entry_size = ENTRY_FILE_KEY_OFFSET + scan_get_key_size(scan_iter);
+        scan_iter->offset += entry_size;
 
-        if (result->offset >= data_size)
+        if (scan_iter->offset >= data_size)
         {
             // No more entries
             return;
         }
-
-        lock_pages_to_scan_next_entry(result);
     }
 }
+
+static void allocate_pages_for_entry(
+        scan_iter_t * scan_iter,
+        int entry_size)
+{
+}
+
 
 /* 
  * Ensures that we have all pages containing data for the entry we are
  * pointing to.
  */
-static void lock_pages_to_scan_entry(scan_result_t * scan)
+static void lock_pages_to_scan_entry(scan_iter_t * scan)
 {
     memory_page_t * next_mem_page;
     page_t * next_page;
@@ -1667,14 +1686,14 @@ static void lock_pages_to_scan_entry(scan_result_t * scan)
         add_pages_to_scan(scan, 1);
     }
 
-    key_size = scan_get_key_size(result);
+    key_size     = scan_get_key_size(result);
     needed_pages = (scan->offset + ENTRY_KEY_OFFSET + key_size) / PAGE_SIZE;
     add_pages_to_scan(scan, needed_pages - scan->num_pages);
 }
 
 static void add_pages_to_scan(
         bitcask_keydir * keydir,
-        scan_result_t * scan,
+        scan_iter_t * scan,
         int n)
 {
     uint32_t next;
@@ -1688,7 +1707,7 @@ static void add_pages_to_scan(
         {
             // memory page
             mem_page = keydir->pages[next];
-            page = mem_page->page;
+            page = &mem_page->page;
         }
         else
         {
@@ -1719,27 +1738,42 @@ static void add_pages_to_scan(
  * Skips to next entry in a multi-entry chain if there is any.
  * Returns 1 if should keep going
  */
-static int scan_next(
-        scan_result_t * result,
-        uint64_t        epoch)
+static void scan_to_epoch(
+        scan_iter_t * scan_iter,
+        uint64_t      epoch)
 {
+    uint32_t last_offset;
+    uint32_t next;
+    uint64_t entry_epoch;
 
+    next = scan_get_next(result);
 
+    while (next)
+    {
+        last_offset = scan_iter->offset;
+        scan_iter->offset = next;
+        lock_pages_to_scan_entry(scan_iter);
+        entry_epoch = scan_get_epoch(scan_iter);
+        if (entry_epoch >= epoch)
+        {
+            return;
+        }
+    }
 }
 
 /*
  * Populate return entry fields from scan data.
  * It handles entries split across page boundaries.
  */
-static void scan_result_to_entry(
-        scan_result_t * scan_result,
+static void scan_iter_to_entry(
+        scan_iter_t * scan_iter,
         return_entry_t * return_entry)
 {
-    return_entry->epoch    = scan_get_epoch(scan_result);
-    return_entry->file_id  = scan_get_file_id(scan_result);
-    return_entry->total_sz = scan_get_total_sz(scan_result);
-    return_entry->offset   = scan_get_offset(scan_result);
-    return_entry->tstamp   = scan_get_timestamp(scan_result);
+    return_entry->epoch    = scan_get_epoch(scan_iter);
+    return_entry->file_id  = scan_get_file_id(scan_iter);
+    return_entry->total_sz = scan_get_total_sz(scan_iter);
+    return_entry->offset   = scan_get_offset(scan_iter);
+    return_entry->tstamp   = scan_get_timestamp(scan_iter);
 }
 
 static void unlock_pages(int num_pages, page_t ** pages)
@@ -1750,17 +1784,23 @@ static void unlock_pages(int num_pages, page_t ** pages)
     }
 }
 
-static void free_scan_result(scan_result_t * scan_result)
+static void free_scan_iter(scan_iter_t * scan_iter)
 {
-    unlock_pages(scan_result->num_pages, scan_result->pages);
+    unlock_pages(scan_iter->num_pages, scan_iter->pages);
+
+    if (scan_iter->page_array_size > SCAN_INITIAL_PAGE_ARRAY_SIZE)
+    {
+        free(scan_iter->pages);
+        free(scan_iter->mem_pages);
+    }
 }
 
-static int keydir_get(
-        bitcask_keydir *    keydir,
-        char *              key,
-        int                 key_size,
-        uint64_t            epoch,
-        return_entry_t *    result)
+static void scan_for_key(
+        bitcask_keydir * keydir,
+        char * key,
+        int    key_size,
+        uint64_t epoch,
+        scan_iter_t * scan_iter)
 {
     uint32_t base_idx;
     memory_page_t * base_page;
@@ -1770,40 +1810,96 @@ static int keydir_get(
     base_page = keydir->memory_pages[base_idx];
 
     enif_mutex_lock(base_page->mutex);
+
     if (base_page->swap_idx)
     {
         first_page = get_swap_page(base_page->swap_idx, keydir->swap_pages);
         enif_mutex_lock(first_page->mutex);
         enif_mutex_unlock(base_page->mutex);
     }
-    else if (is_page_free(base_page))
-    {
-        enif_mutex_unlock(base_page->mutex);
-        return 0;
-    }
     else
     {
         first_page = &base_page->page;
     }
 
-    scan_result_t scan_result;
-    scan_pages(key, key_size, epoch, first_page, base_page, &scan_result);
+    init_scan_iterator(scan_iter, base_idx, first_page, base_page);
+    scan_pages(key, key_size, epoch, &scan_iter);
+}
 
-    if (scan_result.found)
+static int keydir_get(
+        bitcask_keydir *    keydir,
+        char *              key,
+        int                 key_size,
+        uint64_t            epoch,
+        return_entry_t *    result)
+{
+    scan_iter_t scan_iter;
+    scan_for_key(keydir, key, key_size, epoch, &scan_iter);
+
+    if (scan_iter.found)
     {
-        while (scan_next(&scan_result, epoch))
-            ;
-        scan_result_to_entry(&scan_result, return_entry);
-        free_scan_result(&scan_result);
-        return 1;
+        // If multi-version, find version for requested epoch
+        scan_to_epoch(&scan_iter, epoch);
+        scan_iter_to_entry(&scan_iter, return_entry);
     }
-    else
+
+    free_scan_iter(&scan_iter);
+    return scan_iter.found;
+}
+
+uint64_t atomic_incr64(uint64_t * v)
+{
+    // TODO: Do it for realz
+    return ++(*v);
+}
+
+static void keydir_put(
+        bitcask_keydir * keydir,
+        char *           key,
+        int              key_size,
+        uint32_t         file_id,
+        uint64_t         total_sz,
+        uint64_t         offset,
+        uint32_t         tstamp,
+        uint32_t         nowsec,
+        int              is_merge_put,
+        uint32_t         old_file_id,
+        uint64_t         old_offset)
+{
+    scan_iter_t scan_iter;
+    uint32_t orig_size;
+    uint64_t epoch = atomic_incr64(&keydir->epoch);
+    // TODO: min_epoch read needs a memory barrier to guarantee
+    // we don't see a stale 'no epoch' value from before the epoch increment
+    // when in fact it is set to a snapshot we can't overwrite.
+    int can_update_in_place = keydir->min_epoch > epoch;
+    scan_for_key(keydir, key, key_size, epoch, &scan_iter);
+
+    orig_size = scan_iter.mem_pages[0]->size;
+
+    if (scan_iter.found && can_update_in_place)
     {
-        free_scan_result(&scan_result);
-        return 0;
+    }
+
+    free_scan_iter(&scan_iter);
+
+    // If chain was empty, remove base page from free list
+    if (orig_size == 0)
+    {
+        remove_from_free_list(scan_iter.base_idx);
     }
 }
 
+static remove_from_free_list(bitcask_keydir * keydir, uint32_t page_idx)
+{
+    // TODO it!
+    // Using mutexes, but locking for the purposes of manipulating free
+    // list should probably use spinlocks.
+    // Read prev free idx (use mem barrier to get freshest value)
+    // If no previous free page, lock page, try removing from head of list.
+    //
+    // Lock previous free page if anin chain, if any
+}
 
 /* int erts_printf(const char *, ...); */
 
@@ -2155,7 +2251,6 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
 
             handle->iterating = 1;
             handle->epoch = keydir->epoch;
-            keydir->newest_folder = keydir->epoch;
             keydir->keyfolders++;
             handle->iterator = kh_begin(keydir->entries);
             DEBUG2("LINE %d itr started, keydir->pending = 0x%lx\r\n", __LINE__, keydir->pending);
