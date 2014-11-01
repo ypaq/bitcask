@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/mman.h>
 #include <assert.h>
 
 #include "erl_nif.h"
@@ -237,6 +238,7 @@ typedef struct
 {
     ErlNifMutex *   mutex;
     void *          data;
+    uint32_t        prev;
     uint32_t        next;
     uint32_t        prev_free;
     uint32_t        next_free;
@@ -246,8 +248,9 @@ typedef struct
 {
     page_t   page;
     uint32_t size;
-    uint32_t swap_idx;
+    uint32_t alt_idx;
     uint32_t dead_bytes;
+    uint8_t  is_borrowed;
 } mem_page_t;
 
 struct swap_array_struct
@@ -261,15 +264,18 @@ typedef struct swap_array_struct swap_array_t;
 
 typedef struct
 {
-    ErlNifMutex*      mutex;
+    ErlNifMutex *     mutex;
     void *            page_buffer;
     mem_page_t *      mem_pages;
     uint32_t          num_pages;
     volatile uint32_t free_list_head;
+    ErlNifMutex *     free_list_mutex;
+    int               free_list_empty;
     swap_array_t *    swap_pages;
     uint32_t          num_swap_pages;
-    volatile page_t * swap_free_list_head;
+    volatile uint32_t swap_free_list_head;
     ErlNifMutex*      swap_grow_mutex;
+    int               swap_file_desc;
 
     volatile uint64_t epoch;
     volatile uint64_t min_epoch;
@@ -551,6 +557,11 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
             // Be sure to initialize the mutex and set our refcount
             keydir->mutex = enif_mutex_create(name);
             keydir->refcount = 1;
+
+            // Initialize free list
+            keydir->free_list_empty = 0;
+            // Skip over 1/4 of pages until all pages are in free list.
+            // TODO it
 
             // Finally, register this new keydir in the globals
             kh_put2(global_keydirs, priv->global_keydirs, keydir->name, keydir);
@@ -1555,15 +1566,26 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
     }
 }
 
-static int is_page_free(mem_page_t * page)
+static int is_page_borrowed(mem_page_t * page)
 {
-    return page->page.prev_free == 0 && page->page.next_free == 0;
+    return page->is_borrowed;
 }
 
-static void unset_free_flag(mem_page_t * page)
+static int is_page_free(mem_page_t * page)
 {
+    return page->prev_free != 0 || page->next_free != 0;
+}
+
+static void unset_free(mem_page_t * page)
+{
+    page->is_free = 0;
     page->page.prev_free = 0;
     page->page.next_free = 0;
+}
+
+static void set_borrowed(mem_page_t * page)
+{
+    page->is_borrowed = 1;
 }
 
 static page_t * get_swap_page(uint32_t idx, swap_array_t * swap_pages)
@@ -1576,6 +1598,16 @@ static page_t * get_swap_page(uint32_t idx, swap_array_t * swap_pages)
     // assert(idx > swap_pages->size)
     // We never call this function with out of bounds indices
     return get_swap_page(idx - swap_pages->size, swap_pages->next);
+}
+
+static swap_array_t * get_last_swap_array(swap_array_t * swap_pages)
+{
+    swap_array_t * p = swap_pages;
+    while(p->next)
+    {
+        p = p->next;
+    }
+    return p;
 }
 
 typedef struct
@@ -1799,7 +1831,7 @@ static void add_pages_to_scan(
 
         enif_mutex_lock(page->mutex);
 
-        expand_page_array(iter);
+        scan_expand_page_array(iter);
 
         scan->pages[scan->num_pages] = page;
         scan->mem_pages[scan->num_pages] = mem_page;
@@ -1878,9 +1910,19 @@ static void unlock_pages(int num_pages, page_t ** pages)
     }
 }
 
-static void free_scan_iter(scan_iter_t * scan_iter)
+#define FREE_SCAN_DEFAULT 0
+#define FREE_SCAN_LEAVE_BASE_LOCKED 1
+
+static void free_scan_iter(scan_iter_t * scan_iter, int flags)
 {
-    unlock_pages(scan_iter->num_pages, scan_iter->pages);
+    if (flags & FREE_SCAN_LEAVE_BASE_LOCKED)
+    {
+        unlock_pages(scan_iter->num_pages - 1, scan_iter-> pages + 1);
+    }
+    else
+    {
+        unlock_pages(scan_iter->num_pages, scan_iter->pages);
+    }
 
     if (scan_iter->page_array_size > SCAN_INITIAL_PAGE_ARRAY_SIZE)
     {
@@ -1911,18 +1953,37 @@ static void scan_for_key( bitcask_keydir *  keydir,
    
     base_idx = hash_key(key, key_size) % keydir->num_pages;
     base_page = keydir->mem_pages[base_idx];
-
     enif_mutex_lock(base_page->mutex);
 
-    if (base_page->swap_idx)
+    while (1)
     {
-        first_page = get_swap_page(base_page->swap_idx, keydir->swap_pages);
-        enif_mutex_lock(first_page->mutex);
-        enif_mutex_unlock(base_page->mutex);
-    }
-    else
-    {
-        first_page = &base_page->page;
+        if (base_page->alt_idx)
+        {
+            if (is_page_free(&base_page->page))
+            {
+                // Avoid locking a free page for too long.
+                enif_mutex_unlock(base_page->page.mutex);
+                first_page = get_swap_page(base_page->alt_idx, keydir->swap_pages);
+                enif_mutex_lock(first_page->mutex);
+                if (first_page->prev != base_idx)
+                {
+                    enif_mutex_unlock(first_page->mutex);
+                    continue; // retry
+                }
+            }
+            else
+            {
+                first_page = get_swap_page(base_page->alt_idx, keydir->swap_pages);
+                enif_mutex_lock(first_page->mutex);
+                enif_mutex_unlock(base_page->page.mutex);
+                break;
+            }
+        }
+        else
+        {
+            first_page = &base_page->page;
+            break;
+        }
     }
 
     init_scan_iterator(scan_iter, base_idx, first_page, base_page);
@@ -1943,7 +2004,7 @@ static int keydir_get(bitcask_keydir *    keydir,
         scan_iter_to_entry(&scan_iter, return_entry);
     }
 
-    free_scan_iter(&scan_iter);
+    free_scan_iter(&scan_iter, FREE_SCAN_DEFAULT);
     // The free operation only frees allocated memory and releases locks.
     // It is still safe to use simple fields in the iterator, like found.
     return scan_iter.found;
@@ -2008,11 +2069,15 @@ static uint32_t entry_size_for_key(uint32_t key_size)
     return (unpadded_size + 7) / 8 * 8;
 }
 
-#define EXPAND_OK 0 
-#define EXPAND_RESTART 1
-#define EXPAND_NO_MEM 2
+#define WRITE_PREP_OK 0 
+#define WRITE_PREP_RESTART 1
+#define WRITE_PREP_NO_MEM 2
 
 /**
+ * If old_file_id and old_offset are given, caller wants to update an existing
+ * version of a value. The operation should fail if the latest version of the
+ * entry has differend file/offset or entry has been removed.
+ *
  * Returns 1 if write succeeded,
  * 0 if conditional write failed since the current entry doesn't match.
  */
@@ -2031,11 +2096,12 @@ static int keydir_put(bitcask_keydir * keydir,
     int can_update_in_place;
     int write_ok = 1;
     uint32_t chain_size;
-    int expand_ret;
+    int write_prep_ret;
 
     // May need to retry whole operation sometimes when
     // avoiding deadlocks allocating pages requires us to undo locks
-    // and re-lock again
+    // and re-lock again, which may allow a different thread to change things
+    // under us. Just rety with a higher epoch.
     while(1)
     {
         epoch = atomic_incr64(&keydir->epoch);
@@ -2069,15 +2135,15 @@ static int keydir_put(bitcask_keydir * keydir,
                 // Point previous version to extra version.
                 scan_set_next(&iter, chain_size);
                 // Expand to fit extra version, no extra copy of key needed.
-                expand_ret = expand_pages_to_fit_extra_key(keydir, &iter, 0);
+                write_prep_ret = write_prep(keydir, &iter, 0);
 
-                if (expand_ret == EXPAND_NO_MEM)
+                if (write_prep_ret == WRITE_PREP_NO_MEM)
                 {
                     write_ok = 0;
                     break;
                 }
 
-                if (expand_ret == EXPAND_RESTART)
+                if (write_prep_ret == WRITE_PREP_RESTART)
                 {
                     // Iterator has been freed. Retry scanning and locking.
                     continue;
@@ -2101,7 +2167,11 @@ static int keydir_put(bitcask_keydir * keydir,
         }
         else
         {
-            expand_pages_to_fit_extra_key(keydir, &iter, key_size);
+            write_prep_ret = write_prep(keydir, &iter, key_size);
+            if (write_prep_ret == WRITE_PREP_RESTART)
+            {
+                continue;
+            }
             scan_set_file_id(&iter, file_id);
             scan_set_offset(&iter, offset);
             scan_set_total_size(&iter, total_sz);
@@ -2113,121 +2183,357 @@ static int keydir_put(bitcask_keydir * keydir,
         break;
     }
 
-    // If appended a value and base page is in free list, remove.
-    int should_remove_from_free = write_ok &&
-        (iter->pages[0] == &iter->mem_pages[0].page) &&
-        is_page_free(iter->mem_pages[0]);
-
-    free_scan_iter(&iter);
-
-    if (should_remove_from_free)
-    {
-        remove_from_free_list(iter.base_idx);
-    }
+    free_scan_iter(&iter, FREE_SCAN_DEFAULT);
 
     return write_ok;
 }
 
-static int scan_first_page_in_memory(scan_iter_t * iter)
+static int scan_is_first_in_memory(scan_iter_t * iter)
 {
     return iter->pages[0] == &iter->mem_pages[0]->page;
 }
 
-static int expand_pages_to_fit_extra_key(bitcask_keydir *   keydir,
-                                         scan_iter_t *        iter,
-                                         uint32_t           key_size)
+/*
+ * Prepare chain to do a write.
+ * If base page is free, remove from free list.
+ * If base page is borrowed, need to claim it and find home to previous tenant.
+ * If no space for new entry, allocate needed pages.
+ */
+static int write_prep(bitcask_keydir *   keydir,
+                      scan_iter_t *      iter,
+                      uint32_t           key_size)
 {
     uint32_t size = iter->mem_pages[0]->size;
     uint32_t entry_size = entry_size_for_key(key_size);
     uint32_t wanted_size = iter->offset + entry_size;
-    mem_page_t * mem_page;
-    page_t * page;
+    mem_page_t * new_mem_page, * base_page;
+    uint32_t new_page_idx, num_pages, wanted_pages, num_extra_pages;
+    page_t * new_page;
 
     if (wanted_size < size)
     {
-        // Size overflow. Give up on life!
-        return EXPAND_NO_MEM;
+        // Size overflow (> 4G). Give up on life!
+        return WRITE_PREP_NO_MEM;
     }
 
-    uint32_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE; 
-    uint32_t wanted_pages = (wanted_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    uint32_t num_extra_pages = wanted_pages - num_pages;
+    num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE; 
+    wanted_pages = (wanted_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    num_extra_pages = wanted_pages - num_pages;
+
+    base_page = iter->mem_pages[0];
+
+    // If about to write to a free page, remove it from the free list quickly.
+    // We should not block threads acquiring free pages.
+    if (scan_is_first_in_memory(iter) && is_page_free(iter->mem_pages[0]))
+    {
+        free_scan_iter(iter, FREE_SCAN_LEAVE_BASE_LOCKED);
+        remove_from_free_list(iter->base_idx, 1);
+        return WRITE_PREP_RESTART;
+    }
+
+    // If base page borrowed by another chain, claim it.
+    if (size == 0 && is_page_borrowed(iter->mem_pages[0]))
+    {
+        // Try to allocate another page and transfer data.
+        if (enif_mutex_trylock(iter->mem_pages[0].page.mutex))
+        {
+            // Oops. Likely a thread is trying to lock our page.
+            // For now, let's take the latency hit and let the other guy do
+            // its thing, try again later.
+            // TODO: Consider simply using an alternate memory or swap page
+            // if this becomes a problem. We are most likely blocking an Erlang
+            // scheduler here and wasting CPU.
+            // TODO: Maybe simply signal that the operation should by tried
+            // later, maybe in an async thread.
+            enif_mutex_unlock(base_page->page.mutex);
+            //enif_mutex_lock(
+        }
+    }
 
     while (num_extra_pages--)
     {
-        // Can not lock any free pages if our chain's first page is free.
-        // No choice but to remove from free list and restart write operation.
-        if (scan_first_page_in_memory(iter) &&
-            is_page_free(iter->mem_pages[0]))
-        {
-            free_scan_iter(iter);
-            remove_from_free_list(iter->base_idx);
-            return EXPAND_RESTART;
-        }
+        new_mem_page = allocate_free_page(keydir);
 
-        mem_page = allocate_free_page(keydir);
-
-        if (mem_page)
+        if (new_mem_page)
         {
-            page = &mem_page->page;
+            new_page = &new_mem_page->page;
+            new_page_idx = new_mem_page - keydir->mem_pages;
         }
         // TODO: Pick from underutilized pages first if none free
         else
         {
-            mem_page = (mem_page_t*)0;
-            page = allocate_swap_page(keydir);
+            new_mem_page = (mem_page_t*)0;
+            new_page = allocate_swap_page(keydir, &new_page_idx);
+            if (!new_page)
+            {
+                return WRITE_PREP_NO_MEM;
+            }
+            // Note: swap pages are not locked. Nobody can get to them
+            // once taken out of the swap free list and before they get
+            // access to a chain containing them, which we have locked.
         }
 
-        scan_expand_page_array(iter)
+        scan_expand_page_array(iter);
 
-        scan->pages[scan->num_pages] = page;
-        scan->mem_pages[scan->num_pages] = mem_page;
+        scan->pages[scan->num_pages-1].next = next_page_idx;
+        scan->pages[scan->num_pages] = new_page;
+        scan->mem_pages[scan->num_pages] = new_mem_page;
         ++scan->num_pages;
     }
 
-    return EXPAND_OK;
+    return WRITE_PREP_OK;
+}
+
+/*
+ * Adds a page to the front of the free list.
+ * It will spin without locking until successful, so we better make
+ * sure that no operation ever locks a free page for longer than it needs
+ * to take it out of the free list.
+ * Page has to be already locked by caller.
+ */
+static void add_free_page(bitcask_keydir * keydir, uint32_t page_idx)
+{
+    mem_page_t * mem_page, first_free_page;
+    uint32_t first_free_idx;
+
+    mem_page = keydir->mem_pages[page_idx];
+    mem_page->page.prev_free = MAX_PAGE_IDX;
+    mem_page->page.is_free = 1;
+
+    while (1)
+    {
+        first_free_idx = keydir->free_list_head;
+        if (first_free_idx == MAX_PAGE_IDX)
+        {
+            if (enif_mutex_trylock(keydir->free_list_mutex))
+            {
+                continue;
+            }
+
+            if (keydir->free_list_empty)
+            {
+                keydir->free_list_empty = 0;
+                keydir->free_list_head = page_idx;
+                enif_mutex_unlock(keydir->free_list_mutex);
+                return;
+            }
+            else
+            {
+                enif_mutex_unlock(keydir->free_list_mutex);
+                continue;
+            }
+        }
+        else
+        {
+            first_free_page = keydir->mem_pages[first];
+
+            if (enif_mutex_trylock(first_free_page->page.mutex))
+            {
+                continue;
+            }
+
+            if (is_page_free(first_free_page))
+            {
+                mem_page->page.next_free = first_free_idx;
+                first_free_page->page.prev_free = page_idx;
+                keydir->free_list_head = page_idx;
+                enif_mutex_unlock(first_free_page->page.mutex);
+                return;
+            }
+            else
+            {
+                enif_mutex_unlock(first_free_page->page.mutex);
+                continue;
+            }
+        }
+    }
 }
 
 static mem_page_t * allocate_free_page(bitcask_keydir * keydir)
 {
-    uint32_t first;
-    uint32_t second;
-    mem_page_t * mem_page;
+    uint32_t first, second;
+    mem_page_t * mem_page, * next_page = NULL;
+    // Note that I've ended up implemented a lock-free linked list
+    // with internal node deletions using trylock.
+    // TODO: Look to replace with robust lock-free library, maybe librcu,
+    // which may be faster when we can inject enough concurrency into Bitcask,
+    // but also more likely to be correct on all platforms.
+    // Modern futex based implementations of pthreads might be good enough,
+    // though. Benchmark!
     
     while(1)
     {
         first = keydir->free_list_head;
+
         if (first == MAX_PAGE_IDX)
         {
-            return 0;
+            // Free list is empty.
+            return (mem_page_t*)0;
         }
 
         mem_page = keydir->mem_pages[free_list_head];
-        second_page_idx = mem_page->page.next_free;
 
-        if (atomic_cas_32(&keydir->free_list_head, first, second))
+        if (enif_mutex_trylock(mem_page->page.mutex))
         {
-            // We won the race! Quick, grab the page
-            enif_mutex_lock(mem_page->mutex);
-            if (!is_page_free(mem_page))
+            // Free page being touched, so about to be removed.
+            // Should be quick: spin.
+            continue;
+        }
+
+        if (mem_page->page.prev_free != MAX_PAGE_IDX)
+        {
+            // Somebody beat us to removing from free list, retry.
+            enif_mutex_unlock(mem_page->page.mutex);
+            continue;
+        }
+
+        mem_page->page.prev_free = 0;
+        mem_page->page.next_free = 0;
+        set_borrowed_flag(mem_page);
+
+        // Acquire next page to update list to point to it.
+        if (mem_page->page.next_free != MAX_PAGE_IDX)
+        {
+            next_page = keydir->mem_pages[mem_page->page.next_free];
+            // It is OK to spin locking the next page. The contract is 
+            // pages in the free list are locked for a very short time
+            // and modifying the free list requires pages to be locked
+            // in free list order. So a locked page will soon be unlocked,
+            // potentially to spin trying to lock the page we already have
+            // locked.
+            while (0 != enif_mutex_trylock(next_page->page.mutex))
+                ;
+
+            next_page->page.prev_free = MAX_PAGE_IDX;
+            keydir->free_list_head = mem_page->page.next_free;
+            enif_mutex_unlock(next_page->page.mutex);
+        }
+        else
+        {
+            keydir->free_list_head = mem_page->page.next_free;
+        }
+
+        // Page is returned locked!
+        return mem_page;
+    }
+}
+
+static page_t * allocate_swap_page(bitcask_keydir * keydir, int * idx_out)
+{
+    uint32_t head_idx, num_swap_pages;
+    page_t head_page;
+
+    // May need to be retried
+    while(1)
+    {
+        head_idx = keydir->swap_free_list_head;
+
+        // If list empty, expand swap file.
+        if (head_idx == MAX_PAGE_IDX)
+        {
+            expand_swap_file(keydir);
+
+            if (head_idx == MAX_PAGE_IDX)
             {
-                // alas, somebody put it to use first, restart
-                enif_mutex_unlock(mem_page->mutex);
-                continue;
+                // Oops, allocation failed.
+                return (page_t*)0;
             }
-            unset_free_flag(mem_page);
-            return mem_page;
+            continue; // retry
+        }
+
+        head_page = get_swap_page(head_idx, keydir->swap_pages);
+
+        if (atomic_cas_32(&keydir->swap_free_list_head,
+                          head_idx, head_page->next_free))
+        {
+            // We got the page!
+            *idx_out = head_idx;
+            return head_page;
         }
     }
 }
 
-static page_t * allocate_swap_page(bitcask_keydir * keydir)
+/*
+ * Returns 0 if successful, other if memory allocation failed.
+ */
+static void expand_swap_file(bitcask_keydir * keydir, uint32_t old_num_pages)
 {
-    page_t * free_page = keydir->swap_free_list_head;
+    off_t new_file_size, page_offset;
+    size_t new_num_pages, new_array_size;
+    uint32_t i, new_head_idx = old_num_pages;
+    page_t * page;
+    swap_array_t new_swap_array;
 
+    enif_mutex_lock(keydir->swap_grow_mutex);
+
+    // Avoid having two threads expand the file in quick sequence
+    if (keydir->num_swap_pages == old_num_pages)
+    {
+       new_file_size = 2 * old_num_pages * PAGE_SIZE;
+       ftruncate(keydir->swap_file_desc, new_file_size);
+
+       swap_array_t last_array = get_last_swap_array(keydir->swap_pages);
+       new_swap_array = malloc(sizeof(swap_array_t));
+       new_swap_array.size = new_num_pages;
+       new_array_size = new_num_pages * sizeof(page_t);
+       page_t * new_pages = malloc(new_array_size);
+       page_offset = old_num_pages * PAGE_SIZE;
+
+       for(i = 0; i < new_num_pages; ++i, page_offset += PAGE_SIZE)
+       {
+           page = &new_pages[i];
+           page->mutex = enif_mutex_create(0);
+           page->data = mmap(0, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+                             keydir->swap_file_desc, page_offset);
+           page->prev_free = new_num_pages + i - 1;
+           page->next_free = new_num_pages + i + 1;
+
+           if (page->data == MAP_FAILED)
+           {
+               new_pages = realloc(new_pages, sizeof(page_t)*i);
+
+               if (i == 0)
+               {
+                   free(new_pages);
+                   new_pages = 0;
+                   free(new_swap_array);
+                   new_swap_array = NULL;
+                   new_head_idx = MAX_PAGE_IDX;
+               }
+               else
+               {
+                   new_swap_array.size = (uint32_t)i;
+               }
+               break;
+           }
+       }
+
+       last_array->next = new_swap_array;
+    }
+
+    if (new_swap_array)
+    {
+        new_swap_array->pages[new_swap_array.size - 1].next = MAX_PAGE_IDX;
+        // Atomically insert new entries at the head of the list.
+        while (1)
+        {
+            new_swap_array->pages[0].prev_free = MAX_PAGE_IDX;
+
+            if (atomic_cas_32(&keydir->swap_free_list_head,
+                              keydir->swap_free_list_head,
+                              new_head_idx))
+            {
+                break;
+            }
+        }
+    }
+
+    enif_mutex_unlock(keydir->swap_grow_mutex);
 }
 
-static void remove_from_free_list(bitcask_keydir * keydir, uint32_t page_idx)
+static void remove_from_free_list(bitcask_keydir * keydir,
+                                  uint32_t page_idx,
+                                  int was_locked)
 {
     mem_page_t * prev, * cur, * next;
     uint32_t prev_idx;
@@ -2236,14 +2542,18 @@ static void remove_from_free_list(bitcask_keydir * keydir, uint32_t page_idx)
 
     while(1)
     {
-        // TODO: A simple memory barrier suffices to read prev the first time
-        // Consider changing if measurable performance bottleneck.
-        enif_mutex_lock(cur->mutex);
+        if (!was_locked)
+        {
+            enif_mutex_lock(cur->mutex);
+        }
 
         // prev = next = 0 combo means not in the free list.
-        if (cur->prev_free == 0 && cur->prev_free == 0)
+        if (is_page_free(cur))
         {
-            enif_mutex_unlock(cur->mutex);
+            if (!was_locked)
+            {
+                enif_mutex_unlock(cur->mutex);
+            }
             return;
         }
 
@@ -2258,9 +2568,10 @@ static void remove_from_free_list(bitcask_keydir * keydir, uint32_t page_idx)
             prev = keydir->mem_pages[cur->prev_free];
             // To avoid deadlock, all threads should lock free pages
             // in list order. So need to unlock and try prev/current/next
-            enif_mutex_unlock(cur->mutex);
-
-            enif_mutex_lock(prev->mutex);
+            if (enif_mutex_trylock(prev->page.mutex) != 0)
+            {
+                enif_mutex_unlock(cur->mutex);
+                enif_mutex_lock(prev->mutex);
             if (prev->next_free != page_idx)
             {
                 // Chain has changed. Retry.
@@ -2281,8 +2592,9 @@ static void remove_from_free_list(bitcask_keydir * keydir, uint32_t page_idx)
             enif_mutex_unlock(prev->mutex);
         }
 
-        cur->next_free = 0;
+        cur->is_free = 0;
         cur->prev_free = 0;
+        cur->next_free = 0;
         enif_mutex_unlock(cur->mutex);
         return;
     }
@@ -2651,14 +2963,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
             {   // Grow 16-at-a-time, expect a single alloc
                 keydir->pending_awaken_size += 16;
                 size_t size = keydir->pending_awaken_size * sizeof(keydir->pending_awaken[0]);
-                if (keydir->pending_awaken == NULL)
-                {
-                    keydir->pending_awaken = malloc(size);
-                }
-                else
-                {
-                    keydir->pending_awaken = realloc(keydir->pending_awaken, size);
-                }
+                keydir->pending_awaken = realloc(keydir->pending_awaken, size);
             }
             enif_self(env, &keydir->pending_awaken[keydir->pending_awaken_count]);
             keydir->pending_awaken_count++;
