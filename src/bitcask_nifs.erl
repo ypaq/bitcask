@@ -33,7 +33,6 @@
          keydir_get/3,
          keydir_get_epoch/1,
          keydir_remove/2, keydir_remove/5,
-         keydir_copy/1,
          keydir_fold/5,
          keydir_itr/3,
          keydir_itr_next/1,
@@ -209,11 +208,6 @@ keydir_remove(Ref, Key, Tstamp, FileId, Offset) ->
                       bitcask_time:tstamp()).
 
 keydir_remove_int(_Ref, _Key, _Tstamp, _FileId, _Offset, _TStamp) ->
-    erlang:nif_error({error, not_loaded}).
-
--spec keydir_copy(reference()) ->
-        {ok, reference()}.
-keydir_copy(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_itr(reference(), integer(), integer()) ->
@@ -537,18 +531,6 @@ keydir_itr_test_base(Ref) ->
     true = lists:keymember(<<"abc">>, #bitcask_entry.key, List),
     true = lists:keymember(<<"def">>, #bitcask_entry.key, List),
     true = lists:keymember(<<"hij">>, #bitcask_entry.key, List).
-
-keydir_copy_test_() ->
-    {timeout, 60, fun keydir_copy_test2/0}.
-
-keydir_copy_test2() ->
-    {ok, Ref1} = keydir_new(),
-    ok = keydir_put(Ref1, <<"abc">>, 0, 1234, 0, 1, bitcask_time:tstamp()),
-    ok = keydir_put(Ref1, <<"def">>, 0, 4567, 1234, 2, bitcask_time:tstamp()),
-    ok = keydir_put(Ref1, <<"hij">>, 1, 7890, 0, 3, bitcask_time:tstamp()),
-
-    {ok, Ref2} = keydir_copy(Ref1),
-    #bitcask_entry { key = <<"abc">>} = keydir_get(Ref2, <<"abc">>).
 
 keydir_named_test_() ->
     {timeout, 60, fun keydir_named_test2/0}.
