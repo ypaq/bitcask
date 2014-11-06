@@ -391,8 +391,6 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
             strncpy(keydir->name, name, name_sz + 1);
 
             // Be sure to initialize the mutex and set our refcount
-            keydir->mutex = enif_mutex_create(name);
-            keydir->refcount = 1;
 
             keydir_common_init(keydir, ".", 1024, 1024);
 
@@ -1577,11 +1575,6 @@ static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
     // refcount of 0. Either way, we want to release it.
     if (keydir)
     {
-        if (keydir->mutex)
-        {
-            enif_mutex_destroy(keydir->mutex);
-        }
-
         free_keydir(keydir);
     }
 }

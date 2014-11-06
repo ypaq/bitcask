@@ -41,23 +41,22 @@
 
 #define PAGE_SIZE 4096
 
-#define SCAN_INITIAL_PAGE_ARRAY_SIZE 64
-
 #define kh_put2(name, h, k, v) {                        \
         int itr_status;                                 \
         khiter_t itr = kh_put(name, h, k, &itr_status); \
         kh_val(h, itr) = v; }
 
-static void free_swap_pages_array(swap_array_t * swap_array)
+static void free_swap_array(swap_array_t * swap_array)
 {
     if (swap_array)
     {
         if (swap_array->next)
         {
-            free_swap_pages_array(swap_array->next);
+            free_swap_array(swap_array->next);
         }
 
         free(swap_array->pages);
+        free(swap_array);
     }
 }
 
@@ -82,18 +81,29 @@ static void keydir_free_memory(bitcask_keydir * keydir)
 
     if (keydir->swap_file_desc > -1)
     {
+        // Truncating will avoid dirty memory mapped pages from being written
+        // to disk unnecessarily.
         ftruncate(keydir->swap_file_desc, 0);
+        close(keydir->swap_file_desc);
     }
 
-    if (keydir->swap_pages)
-    {
-        free(keydir->swap_pages->pages);
-    }
-
-    free_swap_pages_array(keydir->swap_pages);
+    free_swap_array(keydir->swap_pages);
     free(keydir->mem_pages);
     free(keydir->buffer);
 
+    if (keydir->mutex)
+    {
+        enif_mutex_destroy(keydir->mutex);
+        keydir->mutex = NULL;
+    }
+
+    if (keydir->swap_grow_mutex)
+    {
+        enif_mutex_destroy(keydir->swap_grow_mutex);
+        keydir->swap_grow_mutex = NULL;
+    }
+
+    keydir->fstats = NULL;
     keydir->swap_pages = NULL;
     keydir->mem_pages = NULL;
     keydir->buffer = NULL;
@@ -107,8 +117,12 @@ static void keydir_init_free_list(bitcask_keydir * keydir)
     uint32_t n = keydir->num_pages;
     const uint32_t step = 16;
     uint32_t offset = 0;
+
+    // Notice this will fail miserably if num_pages is ever zero
+
     keydir->free_list_head = 0;
 
+    // Set next index on all but last page in sequence
     while (--n)
     {
         next_idx = idx + step;
@@ -120,6 +134,7 @@ static void keydir_init_free_list(bitcask_keydir * keydir)
         idx = next_idx;
     }
 
+    // And point the last one to nowhere
     keydir->mem_pages[idx].page.next_free = MAX_PAGE_IDX;
 }
 
@@ -129,37 +144,38 @@ static void keydir_init_free_list(bitcask_keydir * keydir)
  * Returns an errno code or zero if successful. 
  */
 int keydir_common_init(bitcask_keydir * keydir,
-                               const char * basedir,
-                               uint32_t num_pages,
-                               uint32_t initial_num_swap_pages)
+                       const char * basedir,
+                       uint32_t num_pages,
+                       uint32_t initial_num_swap_pages)
 
 {
     char swap_path[KEYDIR_INIT_PATH_BUFFER_LENGTH];
+    int ret_code;
 
     // Avoid unitialized pointers in case we call keydir_free_memory()
+    keydir->mutex = NULL;
+    keydir->swap_grow_mutex = NULL;
     keydir->buffer = NULL;
     keydir->mem_pages = NULL;
     keydir->swap_pages = NULL;
-    
+
+    keydir->refcount = 1;
+    keydir->num_pages = num_pages;
+    keydir->num_swap_pages = initial_num_swap_pages;
+    keydir->epoch = 0;
+    keydir->min_epoch = MAX_EPOCH;
+
+    keydir->mutex = enif_mutex_create(keydir->name);
+    keydir->swap_grow_mutex = enif_mutex_create(0);
     keydir->buffer = malloc(PAGE_SIZE * num_pages);
-
-    if (!keydir->buffer)
-    {
-        keydir_free_memory(keydir);
-        return ENOMEM;
-    }
-
     keydir->mem_pages = malloc(sizeof(mem_page_t) * num_pages);
-
-    if (!keydir->mem_pages)
-    {
-        keydir_free_memory(keydir);
-        return ENOMEM;
-    }
-
     keydir->swap_pages = malloc(sizeof(swap_array_t));
-
-    if (!keydir->swap_pages)
+    
+    if (!keydir->mutex
+        || !keydir->swap_grow_mutex
+        || !keydir->buffer
+        || !keydir->mem_pages
+        || !keydir->swap_pages)
     {
         keydir_free_memory(keydir);
         return ENOMEM;
@@ -197,18 +213,22 @@ int keydir_common_init(bitcask_keydir * keydir,
         return errno;
     }
     
+#ifdef DO_THAT_SHIT_LATER
     // Hide swap file from users.
     // TODO: Add option to keep it visible for debugging.
     if (unlink(swap_path))
     {
+        ret_code = errno;
         keydir_free_memory(keydir);
-        return errno;
+        return ret_code;
     }
+#endif
     
     if (ftruncate(keydir->swap_file_desc, initial_num_swap_pages * PAGE_SIZE))
     {
+        ret_code = errno;
         keydir_free_memory(keydir);
-        return errno;
+        return ret_code;
     }
 
     return 0; // Sweet success!!
@@ -216,10 +236,13 @@ int keydir_common_init(bitcask_keydir * keydir,
 
 void update_fstats(fstats_hash_t * fstats,
                    ErlNifMutex * mutex,
-                   uint32_t file_id, uint32_t tstamp,
+                   uint32_t file_id,
+                   uint32_t tstamp,
                    uint64_t expiration_epoch,
-                   int32_t live_increment, int32_t total_increment,
-                   int32_t live_bytes_increment, int32_t total_bytes_increment,
+                   int32_t live_increment,
+                   int32_t total_increment,
+                   int32_t live_bytes_increment,
+                   int32_t total_bytes_increment,
                    int32_t should_create)
 {
     bitcask_fstats_entry* entry = 0;
@@ -288,22 +311,6 @@ static int hash_key(char * key, uint32_t key_sz)
     return MURMUR_HASH(key, key_sz, 42);
 }
 
-
-static int is_page_borrowed(mem_page_t * page)
-{
-    return page->is_borrowed;
-}
-
-static int is_page_free(page_t * page)
-{
-    return page->is_free;
-}
-
-static void set_borrowed(mem_page_t * page)
-{
-    page->is_borrowed = 1;
-}
-
 static page_t * get_swap_page(uint32_t idx, swap_array_t * swap_pages)
 {
     if (idx < swap_pages->size)
@@ -311,8 +318,8 @@ static page_t * get_swap_page(uint32_t idx, swap_array_t * swap_pages)
         return &swap_pages->pages[idx];
     }
 
-    // assert(idx > swap_pages->size)
-    // We never call this function with out of bounds indices
+    // assert swap_pages->next
+    // Can't call this function with an invalid index yo.
     return get_swap_page(idx - swap_pages->size, swap_pages->next);
 }
 
@@ -326,51 +333,12 @@ static swap_array_t * get_last_swap_array(swap_array_t * swap_pages)
     return p;
 }
 
-typedef struct
+static uint8_t * scan_get_field(scan_iter_t * iter, int field_offset)
 {
-    int                 found;
-    uint32_t            base_idx;
-    uint32_t            offset;
-    uint32_t            num_pages;
-    uint32_t            page_array_size;
-    page_t **           pages;
-    mem_page_t **       mem_pages;
-    page_t *            pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
-    mem_page_t *        mem_pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
-} scan_iter_t;
-
-static void* scan_get_field(scan_iter_t * result, int field_offset)
-{
-    int chain_ofs = result->offset + field_offset;
+    int chain_ofs = iter->offset + field_offset;
     int idx = chain_ofs / PAGE_SIZE;
     int ofs = chain_ofs % PAGE_SIZE;
-    return result->pages[idx]->data + ofs;
-}
-
-static void scan_set_key(scan_iter_t * iter, const char * key, uint32_t key_size)
-{
-    // Split key along potentially multiple pages.
-    // Pages are assumed to be already allocated.
-    int key_offset      = iter->offset + ENTRY_KEY_OFFSET;
-    int page_idx        = key_offset / PAGE_SIZE;
-    int page_offset     = key_offset % PAGE_SIZE;
-    int space_in_page   = PAGE_SIZE - page_offset;
-    size_t section_size = key_size < space_in_page ? key_size : space_in_page;
-    uint32_t remainder  = key_size;
-    const char * src    = key;
-    char * dst          = (char*)iter->pages[page_idx]->data + page_offset;
-
-    memcpy(dst, src, section_size);
-    remainder -= section_size;
-
-    while (remainder > 0)
-    {
-        ++page_idx;
-        src += section_size;
-        section_size = remainder > PAGE_SIZE ? PAGE_SIZE : remainder;
-        memcpy(dst, src, section_size);
-        remainder -= section_size;
-    }
+    return iter->pages[idx]->data + ofs;
 }
 
 static uint64_t scan_get_epoch(scan_iter_t * result)
@@ -445,7 +413,7 @@ static void scan_set_offset(scan_iter_t * iter, uint64_t v)
 
 static void scan_set_next(scan_iter_t * iter, uint32_t v)
 {
-    scan_set_uint64(iter, ENTRY_NEXT_OFFSET, v);
+    scan_set_uint32(iter, ENTRY_NEXT_OFFSET, v);
 }
 
 static void scan_set_key_size(scan_iter_t * iter, uint32_t v)
@@ -453,24 +421,61 @@ static void scan_set_key_size(scan_iter_t * iter, uint32_t v)
     scan_set_uint32(iter, ENTRY_KEY_SIZE_OFFSET, v);
 }
 
+static void scan_set_key(scan_iter_t * iter,
+                         const char * key,
+                         uint32_t key_size)
+{
+    // Split key along potentially multiple pages.
+    // Pages are assumed to be already allocated.
+    int key_offset      = iter->offset + ENTRY_KEY_OFFSET;
+    int page_idx        = key_offset / PAGE_SIZE;
+    int page_offset     = key_offset % PAGE_SIZE;
+    int space_in_page   = PAGE_SIZE - page_offset;
+    size_t section_size = key_size < space_in_page ? key_size : space_in_page;
+    uint32_t remainder  = key_size;
+    const char * src    = key;
+    char * dst          = iter->pages[page_idx]->data + page_offset;
+
+    memcpy(dst, src, section_size);
+    remainder -= section_size;
+
+    while (remainder > 0)
+    {
+        ++page_idx;
+        src += section_size;
+        section_size = remainder > PAGE_SIZE ? PAGE_SIZE : remainder;
+        memcpy(dst, src, section_size);
+        remainder -= section_size;
+    }
+}
+
+/*
+ * Ensures there is space for at least one extra entry in the
+ * iterator's page array.
+ */
 static void scan_expand_page_array(scan_iter_t * iter)
 {
-    size_t byte_size;
+    size_t old_size, new_size;
 
+    // This assumes we only add one item at a time and
+    // resize when old size is full.
     if (iter->num_pages >= iter->page_array_size)
     {
+        old_size = sizeof(void*) * iter->page_array_size;
         iter->page_array_size *= 2;
-        byte_size = sizeof(void*)*iter->page_array_size;
-        // If pointing to static array, switch to dynamic.
-        if (iter->page_array_size == SCAN_INITIAL_PAGE_ARRAY_SIZE)
+        new_size = sizeof(void*) * iter->page_array_size;
+        // If old array was initial static array, don't deallocate! 
+        if (iter->page_array_size == 2 * SCAN_INITIAL_PAGE_ARRAY_SIZE)
         {
-            iter->pages = malloc(byte_size);
-            iter->mem_pages = malloc(byte_size);
+            iter->pages = malloc(new_size);
+            memcpy(iter->pages, iter->pages0, old_size);
+            iter->mem_pages = malloc(new_size);
+            memcpy(iter->mem_pages, iter->mem_pages0, old_size);
         }
         else
         {
-            iter->pages = realloc(iter->pages, byte_size);
-            iter->mem_pages = realloc(iter->mem_pages, byte_size);
+            iter->pages = realloc(iter->pages, new_size);
+            iter->mem_pages = realloc(iter->mem_pages, new_size);
         }
     }
 }
@@ -512,19 +517,21 @@ static void add_pages_to_scan(bitcask_keydir * keydir,
  * pointing to.
  */
 static void lock_pages_to_scan_entry(bitcask_keydir * keydir,
-                                     scan_iter_t * scan)
+                                     scan_iter_t * iter)
 {
-    int needed_pages = (scan->offset + ENTRY_KEY_OFFSET) / PAGE_SIZE + 1;
+    int needed_pages = (iter->offset + ENTRY_KEY_OFFSET) / PAGE_SIZE + 1;
     uint32_t key_size;
 
-    if (needed_pages > scan->num_pages)
+    // First allocate all pages to include this entry without the key
+    if (needed_pages > iter->num_pages)
     {
-        add_pages_to_scan(keydir, scan, 1);
+        add_pages_to_scan(keydir, iter, needed_pages - iter->num_pages);
     }
 
-    key_size     = scan_get_key_size(scan);
-    needed_pages = (scan->offset + ENTRY_KEY_OFFSET + key_size) / PAGE_SIZE;
-    add_pages_to_scan(keydir, scan, needed_pages - scan->num_pages);
+    // Now read the key size and allocate any extra pages needed to include it
+    key_size     = scan_get_key_size(iter);
+    needed_pages = (iter->offset + ENTRY_KEY_OFFSET + key_size) / PAGE_SIZE;
+    add_pages_to_scan(keydir, iter, needed_pages - iter->num_pages);
 }
 
 static void init_scan_iterator(scan_iter_t * scan_iter,
@@ -532,8 +539,8 @@ static void init_scan_iterator(scan_iter_t * scan_iter,
                                page_t * first_page,
                                mem_page_t * first_mem_page)
 {
-    scan_iter->base_idx = base_idx;
     scan_iter->found = 0;
+    scan_iter->base_idx = base_idx;
     scan_iter->offset = 0;
     scan_iter->num_pages = 1;
     scan_iter->page_array_size = SCAN_INITIAL_PAGE_ARRAY_SIZE;
@@ -544,36 +551,47 @@ static void init_scan_iterator(scan_iter_t * scan_iter,
 }
 
 
+/*
+ * Returns 1 if the key matches the entry the iterator points to.
+ * It takes care of comparing a key that may be split along potentially
+ * multiple pages.
+ */
 static int scan_keys_equal(const char * key,
                            uint32_t key_size,
                            scan_iter_t * iter)
 {
-    // compare bit in first page, then in up to PAGE_SIZE length chunks.
-    
-    uint32_t offset = iter->offset;
+    uint32_t offset = iter->offset + ENTRY_KEY_OFFSET;
     uint32_t page_offset = offset % PAGE_SIZE;
     uint32_t page_idx = offset / PAGE_SIZE;
     uint32_t remaining = key_size;
-    int next_size = PAGE_SIZE - page_offset; // potentially rest of first page
+    int len = PAGE_SIZE - page_offset; // potentially rest of first page
     char * entry_key;
 
+    if (strncmp(key, entry_key, len) != 0)
+    {
+        return 0;
+    }
+    remaining -= len;
+
+    len = PAGE_SIZE;
     // This first compares the first bit of the key contained in the first
     // page, then pieces of (or potentially entire) subsequent pages.
     for(entry_key = (char*)iter->pages[page_idx]->data + page_offset;
         remaining > 0;
-        next_size = PAGE_SIZE,
-        entry_key = (char*)iter->pages[++page_idx]->data)
+        // After first page, comparison starts at beginning of page
+        entry_key = iter->pages[++page_idx]->data)
     {
-        if (next_size > remaining)
+        if (len > remaining)
         {
-            next_size = remaining;
+            len = remaining;
         }
 
-        if (strncmp(key, entry_key, next_size) != 0)
+        if (strncmp(key, entry_key, len) != 0)
         {
-            // Difference found
             return 0;
         }
+
+        remaining -= len;
     }
 
     // keys match
@@ -581,29 +599,48 @@ static int scan_keys_equal(const char * key,
 }
 
 /*
- * Skips to next entry in a multi-entry chain if there is any.
- * Returns 1 if should keep going
+ * If current entry has multiple versions, it jumps to the one with the
+ * highest epoch that is lower than the input epoch.
  */
 static void scan_to_epoch(bitcask_keydir * keydir,
                           scan_iter_t * iter,
                           uint64_t      epoch)
 {
-    uint32_t last_offset;
-    uint32_t next;
+    uint32_t last_offset, next;
     uint64_t entry_epoch;
 
+    entry_epoch = scan_get_epoch(iter);
+
+    if (entry_epoch >= epoch)
+    {
+        iter->found = entry_epoch == epoch;
+        return;
+    }
+
+    // Whatever happens, we have one entry below epoch, so found it!
+    iter->found = 1;
+    last_offset = iter->offset;
     next = scan_get_next(iter);
 
-    while (next)
+    while(next)
     {
-        last_offset = iter->offset;
         iter->offset = next;
         lock_pages_to_scan_entry(keydir, iter);
         entry_epoch = scan_get_epoch(iter);
-        if (entry_epoch >= epoch)
+
+        if (entry_epoch == epoch)
         {
             return;
         }
+
+        if (entry_epoch > epoch)
+        {   // Past epoch, so previous was the one
+            iter->offset = last_offset;
+            return;
+        }
+
+        last_offset = iter->offset;
+        next = scan_get_next(iter);
     }
 }
 
@@ -635,7 +672,6 @@ static void scan_pages(bitcask_keydir * keydir,
             }
 
             scan_to_epoch(keydir, scan_iter, epoch);
-            scan_iter->found = 1;
             return;
         }
 
@@ -723,7 +759,7 @@ static void scan_for_key( bitcask_keydir *  keydir,
     {
         if (base_page->alt_idx)
         {
-            if (is_page_free(&base_page->page))
+            if (base_page->page.is_free)
             {
                 // Avoid locking a free page for too long.
                 enif_mutex_unlock(base_page->page.mutex);
@@ -816,9 +852,10 @@ static mem_page_t * allocate_free_page(bitcask_keydir * keydir)
             enif_mutex_lock(page->mutex);
             if (page->is_free)
             {
+                mem_page->is_borrowed = 1;
                 return mem_page;
             }
-            else
+            else // Actually page has been taken already, try next one.
             {
                 enif_mutex_unlock(page->mutex);
             }
@@ -835,7 +872,7 @@ static void expand_swap_file(bitcask_keydir * keydir, uint32_t old_num_pages)
     size_t new_num_pages, new_array_size;
     uint32_t i, new_head_idx = old_num_pages;
     page_t * page;
-    swap_array_t * new_swap_array, * last_array;
+    swap_array_t * new_array, * last_array;
 
     enif_mutex_lock(keydir->swap_grow_mutex);
 
@@ -847,8 +884,8 @@ static void expand_swap_file(bitcask_keydir * keydir, uint32_t old_num_pages)
         ftruncate(keydir->swap_file_desc, new_file_size);
 
         last_array = get_last_swap_array(keydir->swap_pages);
-        new_swap_array = malloc(sizeof(swap_array_t));
-        new_swap_array->size = new_num_pages;
+        new_array = malloc(sizeof(swap_array_t));
+        new_array->size = new_num_pages;
         new_array_size = new_num_pages * sizeof(page_t);
         page_t * new_pages = malloc(new_array_size);
         page_offset = old_num_pages * PAGE_SIZE;
@@ -869,32 +906,32 @@ static void expand_swap_file(bitcask_keydir * keydir, uint32_t old_num_pages)
                 {
                     free(new_pages);
                     new_pages = 0;
-                    free(new_swap_array);
-                    new_swap_array = NULL;
+                    free(new_array);
+                    new_array = NULL;
                     new_head_idx = MAX_PAGE_IDX;
                }
                else
                {
-                   new_swap_array->size = (uint32_t)i;
+                   new_array->size = (uint32_t)i;
                }
                break;
            }
        }
 
-       last_array->next = new_swap_array;
+       last_array->next = new_array;
     }
 
-    if (new_swap_array)
+    if (new_array)
     {
-
-        new_swap_array->pages[new_swap_array->size - 1].next = MAX_PAGE_IDX;
         // Atomically insert new entries at the head of the list.
         while (1)
         {
+            new_array->pages[new_array->size - 1].next = MAX_PAGE_IDX;
             if (bc_atomic_cas_32(&keydir->swap_free_list_head,
                                  keydir->swap_free_list_head,
                                  new_head_idx))
             {
+                keydir->num_swap_pages = new_num_pages;
                 break;
             }
         }
@@ -978,14 +1015,13 @@ static int write_prep(bitcask_keydir *   keydir,
     base_page = iter->mem_pages[0];
 
     // If writing on a free page, mark it as not free anymore.
-    if (scan_is_first_in_memory(iter)
-        && is_page_free(&iter->mem_pages[0]->page))
+    if (scan_is_first_in_memory(iter) && iter->mem_pages[0]->page.is_free)
     {
         base_page->page.is_free = 1;
     }
 
     // If base page borrowed by another chain, claim it.
-    if (size == 0 && is_page_borrowed(iter->mem_pages[0]))
+    if (size == 0 && iter->mem_pages[0]->is_borrowed)
     {
         // Try to allocate another page and transfer data.
         if (enif_mutex_trylock(iter->mem_pages[0]->page.mutex))

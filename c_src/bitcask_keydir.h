@@ -67,7 +67,7 @@ typedef khash_t(fstats) fstats_hash_t;
 typedef struct
 {
     ErlNifMutex *   mutex;
-    void *          data;
+    uint8_t *       data;
     uint32_t        prev;
     uint32_t        next;
     uint32_t        next_free;
@@ -118,6 +118,21 @@ typedef struct
     char              is_ready;
     char              name[0];
 } bitcask_keydir;
+
+#define SCAN_INITIAL_PAGE_ARRAY_SIZE 16
+
+typedef struct
+{
+    int                 found;
+    uint32_t            base_idx;
+    uint32_t            offset;
+    uint32_t            num_pages;
+    uint32_t            page_array_size;
+    page_t **           pages;
+    mem_page_t **       mem_pages;
+    page_t *            pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
+    mem_page_t *        mem_pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
+} scan_iter_t;
 
 /////////////////////////////////////////////////////////////////////////
 // Public Keydir API
