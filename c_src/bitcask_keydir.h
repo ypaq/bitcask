@@ -144,17 +144,21 @@ int keydir_common_init(bitcask_keydir * keydir,
 
 void update_fstats(fstats_hash_t * fstats,
                    ErlNifMutex * mutex,
-                   uint32_t file_id, uint32_t tstamp,
+                   uint32_t file_id,
+                   uint32_t tstamp,
                    uint64_t expiration_epoch,
-                   int32_t live_increment, int32_t total_increment,
-                   int32_t live_bytes_increment, int32_t total_bytes_increment,
+                   int32_t live_increment,
+                   int32_t total_increment,
+                   int32_t live_bytes_increment,
+                   int32_t total_bytes_increment,
                    int32_t should_create);
 
 void free_keydir(bitcask_keydir* keydir);
 
 typedef enum {
     KEYDIR_GET_FOUND = 0,
-    KEYDIR_GET_NOT_FOUND} KeydirGetCode;
+    KEYDIR_GET_NOT_FOUND
+} KeydirGetCode;
 
 KeydirGetCode keydir_get(bitcask_keydir *    keydir,
                          char *              key,
