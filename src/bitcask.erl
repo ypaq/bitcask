@@ -1182,8 +1182,7 @@ scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile, KT) ->
                                                 FileTstamp,
                                                 TotalSz,
                                                 Offset,
-                                                Tstamp,
-                                                false)
+                                                Tstamp)
                 end,
             bitcask_fileops:fold_keys(File, F, undefined, recovery),
             if CloseFile == true ->
@@ -1792,7 +1791,6 @@ write_and_keydir_put(State2, Key, Value, Tstamp, Retries, OldFileId, OldOffset) 
             case bitcask_nifs:keydir_put(State2#bc_state.keydir, Key,
                                          bitcask_fileops:file_tstamp(WriteFile2),
                                          Size, Offset, Tstamp,
-                                         true,
                                          OldFileId, OldOffset) of
                 ok ->
                     {ok, State2#bc_state { write_file = WriteFile2 }};

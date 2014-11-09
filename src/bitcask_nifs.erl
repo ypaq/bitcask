@@ -26,9 +26,7 @@
          maybe_keydir_new/1,
          keydir_mark_ready/1,
          keydir_put/6,
-         keydir_put/7,
          keydir_put/8,
-         keydir_put/9,
          keydir_get/2,
          keydir_get/3,
          keydir_get_epoch/1,
@@ -85,17 +83,19 @@
 -spec init() ->
         ok | {error, any()}.
 init() ->
-    case code:priv_dir(bitcask) of
-        {error, bad_name} ->
-            case code:which(?MODULE) of
-                Filename when is_list(Filename) ->
-                    SoName = filename:join([filename:dirname(Filename),"../priv", "bitcask"]);
-                _ ->
-                    SoName = filename:join("../priv", "bitcask")
-            end;
-         Dir ->
-            SoName = filename:join(Dir, "bitcask")
-    end,
+    SoName =
+        case code:priv_dir(bitcask) of
+            {error, bad_name} ->
+                case code:which(?MODULE) of
+                    Filename when is_list(Filename) ->
+                        filename:join([filename:dirname(Filename),"../priv",
+                                       "bitcask"]);
+                    _ ->
+                        filename:join("../priv", "bitcask")
+                end;
+            Dir ->
+                filename:join(Dir, "bitcask")
+        end,
     erlang:load_nif(SoName, 0).
 
 -ifdef(PULSE).
@@ -139,41 +139,22 @@ keydir_mark_ready(_Ref) ->
                  integer(), integer()) ->
         ok | already_exists.
 keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp) ->
-    keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, false).
-
--spec keydir_put(reference(), binary(), integer(), integer(),
-                 integer(), integer(), boolean()) ->
-        ok | already_exists.
-keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, NewestPutB) ->
-    keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, NewestPutB, 0, 0).
-
--spec keydir_put(reference(), binary(), integer(), integer(),
-                 integer(), integer(), integer(), integer()) ->
-        ok | already_exists.
-keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, OldFileId, OldOffset) ->
-    keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, false,
-               OldFileId, OldOffset).
+    keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, 0, 0).
 
 -spec keydir_put(Ref::reference(), Key::binary(), FileId::integer(),
                  TotalSz::integer(), Offset::integer(), Tstamp::integer(),
-                 NewestPutB::boolean(), OldFileId::integer(),
-                 OldOffset::integer()) ->
+                 OldFileId::integer(), OldOffset::integer()) ->
         ok | already_exists.
-keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, NewestPutB,
-           OldFileId, OldOffset) ->
+keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, OldFileId, OldOffset) ->
     keydir_put_int(Ref, Key, FileId, TotalSz, <<Offset:64/unsigned-native>>,
-                   Tstamp, if not NewestPutB -> 0;
-                              true           -> 1
-                           end,
-                   OldFileId, <<OldOffset:64/unsigned-native>>).
+                   Tstamp, OldFileId, <<OldOffset:64/unsigned-native>>).
 
 -spec keydir_put_int(Ref::reference(), Key::binary(), FileId::integer(),
-                     TotalSz::integer(), Offset::binary(),
-                     Tstamp::integer(), NewestPutI :: 0 | 1,
+                     TotalSz::integer(), Offset::binary(), Tstamp::integer(),
                      OldFileId::integer(), OldOffset::binary()) ->
         ok | already_exists.
 keydir_put_int(_Ref, _Key, _FileId, _TotalSz, _Offset, _Tstamp,
-               _NewestPutI, _OldFileId, _OldOffset) ->
+               _OldFileId, _OldOffset) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_get(reference(), binary()) ->
@@ -256,7 +237,9 @@ increment_file_id(_Ref, _ConditionalFileId) ->
                   integer(), integer()) ->
         any() | {error, any()}.
 keydir_fold(Ref, Fun, Acc0, MaxAge, MaxPuts) ->
-    FrozenFun = fun() -> keydir_fold_cont(keydir_itr_next(Ref), Ref, Fun, Acc0) end,
+    FrozenFun = fun() ->
+                        keydir_fold_cont(keydir_itr_next(Ref), Ref, Fun, Acc0)
+                end,
     keydir_frozen(Ref, FrozenFun, MaxAge, MaxPuts).
 
 %% Execute the function once the keydir is frozen
@@ -632,7 +615,8 @@ keydir_create_del_while_pending_test2() ->
         %% Delete Key
         ok = keydir_put(Ref1, Key, 0, 1234, 0, 1),
         ?assertEqual(#bitcask_entry{key = Key, file_id = 0, total_sz = 1234,
-                                     offset = <<0:64/unsigned-native>>, tstamp = 1},
+                                    offset = <<0:64/unsigned-native>>,
+                                    tstamp = 1},
                      keydir_get_int(Ref1, Key, 16#ffffffffffffffff)),
         ?assertEqual(ok, keydir_remove(Ref1, Key)),
         ?assertEqual(not_found, keydir_get(Ref1, Key)),

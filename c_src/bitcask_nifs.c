@@ -269,7 +269,7 @@ static ErlNifFunc nif_funcs[] =
     {"keydir_new", 1, bitcask_nifs_keydir_new1},
     {"maybe_keydir_new", 1, bitcask_nifs_maybe_keydir_new1},
     {"keydir_mark_ready", 1, bitcask_nifs_keydir_mark_ready},
-    {"keydir_put_int", 10, bitcask_nifs_keydir_put_int},
+    {"keydir_put_int", 8, bitcask_nifs_keydir_put_int},
     {"keydir_get_int", 3, bitcask_nifs_keydir_get_int},
     {"keydir_get_epoch", 1, bitcask_nifs_keydir_get_epoch},
     {"keydir_remove", 3, bitcask_nifs_keydir_remove},
@@ -506,34 +506,30 @@ void print_keydir(bitcask_keydir* keydir)
 }
 #endif
 
-ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env,
+                                         int argc,
+                                         const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
     ErlNifBinary key;
-    char * entry_key;
-    int entry_key_sz;
-    uint32_t entry_file_id;
-    uint32_t entry_total_sz;
-    uint32_t entry_tstamp;
-    uint64_t entry_offset;
-    uint32_t newest_put;
+    keydir_entry_t entry;
     uint32_t old_file_id;
     uint64_t old_offset;
     KeydirPutCode ret_code;
 
-    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle) &&
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle) &&
         enif_inspect_binary(env, argv[1], &key) &&
-        enif_get_uint(env, argv[2], &(entry_file_id)) &&
-        enif_get_uint(env, argv[3], &(entry_total_sz)) &&
-        enif_get_uint64_bin(env, argv[4], &(entry_offset)) &&
-        enif_get_uint(env, argv[5], &(entry_tstamp)) &&
-        enif_get_uint(env, argv[6], &(newest_put)) &&
-        enif_get_uint(env, argv[7], &(old_file_id)) &&
-        enif_get_uint64_bin(env, argv[8], &(old_offset)))
+        enif_get_uint(env, argv[2], &(entry.file_id)) &&
+        enif_get_uint(env, argv[3], &(entry.total_size)) &&
+        enif_get_uint64_bin(env, argv[4], &(entry.offset)) &&
+        enif_get_uint(env, argv[5], &(entry.timestamp)) &&
+        enif_get_uint(env, argv[6], &(old_file_id)) &&
+        enif_get_uint64_bin(env, argv[7], &(old_offset)))
     {
         bitcask_keydir* keydir = handle->keydir;
-        entry_key = (char*)key.data;
-        entry_key_sz = key.size;
+        entry.key = (char*)key.data;
+        entry.key_size = key.size;
 
         DEBUG2("LINE %d put\r\n", __LINE__);
 
@@ -545,10 +541,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env, int argc, const ERL_NIF
         DEBUG_KEYDIR(keydir);
 
 
-        ret_code = keydir_put(keydir, key.data, key.size,
-                              entry_file_id, entry_total_sz,
-                              entry_offset, entry_tstamp,
-                              old_file_id, old_offset);
+        ret_code = keydir_put(keydir, &entry, old_file_id, old_offset);
 
         switch(ret_code)
         {
@@ -574,7 +567,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
 {
     bitcask_keydir_handle* handle;
     ErlNifBinary key;
-    basic_entry_t entry;
+    keydir_entry_t entry;
     KeydirGetCode ret_code;
     uint64 epoch; //intentionally odd type to get around warnings
 

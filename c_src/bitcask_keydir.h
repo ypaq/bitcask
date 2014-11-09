@@ -1,6 +1,6 @@
 // -------------------------------------------------------------------
 //
-// Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+// Copyright (c) 2014 Basho Technologies, Inc. All Rights Reserved.
 //
 // This file is provided to you under the Apache License,
 // Version 2.0 (the "License"); you may not use this file
@@ -46,7 +46,7 @@ typedef struct
 } bitcask_fstats_entry;
 
 // Entry fields carefully laid out to correspond with ENTRY_*_OFFSET
-// constaints and layout in pages. Change with care!
+// constants and layout in pages. Change with care!
 typedef struct
 {
     uint32_t file_id;
@@ -54,8 +54,13 @@ typedef struct
     uint64_t epoch;
     uint64_t offset;
     uint32_t timestamp;
+    uint32_t next;
+    uint32_t key_size;
+    uint8_t *key;
+
+    // Convenience field: make function instead.
     uint8_t  is_tombstone;
-} basic_entry_t;
+} keydir_entry_t;
 
 KHASH_MAP_INIT_INT(fstats, bitcask_fstats_entry*);
 
@@ -119,19 +124,24 @@ typedef struct
     char              name[0];
 } bitcask_keydir;
 
+// Per page info in iterators.
+typedef struct
+{
+    page_t *        page;
+    mem_page_t *    mem_page;
+    uint32_t        page_idx;
+} page_info_t;
+
 #define SCAN_INITIAL_PAGE_ARRAY_SIZE 16
 
 typedef struct
 {
     int                 found;
-    uint32_t            base_idx;
     uint32_t            offset;
     uint32_t            num_pages;
     uint32_t            page_array_size;
-    page_t **           pages;
-    mem_page_t **       mem_pages;
-    page_t *            pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
-    mem_page_t *        mem_pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
+    page_info_t *       pages;
+    page_info_t         pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
 } scan_iter_t;
 
 /////////////////////////////////////////////////////////////////////////
@@ -161,10 +171,10 @@ typedef enum {
 } KeydirGetCode;
 
 KeydirGetCode keydir_get(bitcask_keydir *    keydir,
-                         char *              key,
+                         uint8_t *           key,
                          uint32_t            key_size,
                          uint64_t            epoch,
-                         basic_entry_t *     return_entry);
+                         keydir_entry_t *     return_entry);
 
 typedef enum {
     KEYDIR_PUT_OK = 0,
@@ -174,17 +184,12 @@ typedef enum {
 } KeydirPutCode;
 
 KeydirPutCode keydir_put(bitcask_keydir * keydir,
-                         char *           key,
-                         uint32_t         key_size,
-                         uint32_t         file_id,
-                         uint64_t         total_size,
-                         uint64_t         offset,
-                         uint32_t         timestamp,
+                         keydir_entry_t * entry,
                          uint32_t         old_file_id,
                          uint64_t         old_offset);
 
 KeydirPutCode keydir_remove(bitcask_keydir * keydir,
-                            char * key,
+                            uint8_t * key,
                             uint32_t key_size,
                             // conditional remove options
                             uint32_t old_file_id,
