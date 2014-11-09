@@ -272,9 +272,8 @@ static ErlNifFunc nif_funcs[] =
     {"keydir_put_int", 8, bitcask_nifs_keydir_put_int},
     {"keydir_get_int", 3, bitcask_nifs_keydir_get_int},
     {"keydir_get_epoch", 1, bitcask_nifs_keydir_get_epoch},
-    {"keydir_remove", 3, bitcask_nifs_keydir_remove},
-    {"keydir_remove_int", 6, bitcask_nifs_keydir_remove},
-    {"keydir_copy", 1, bitcask_nifs_keydir_copy},
+    {"keydir_remove", 2, bitcask_nifs_keydir_remove},
+    {"keydir_remove_int", 4, bitcask_nifs_keydir_remove},
     {"keydir_itr_int", 4, bitcask_nifs_keydir_itr},
     {"keydir_itr_next_int", 1, bitcask_nifs_keydir_itr_next},
     {"keydir_itr_release", 1, bitcask_nifs_keydir_itr_release},
@@ -528,7 +527,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env,
         enif_get_uint64_bin(env, argv[7], &(old_offset)))
     {
         bitcask_keydir* keydir = handle->keydir;
-        entry.key = (char*)key.data;
+        entry.key = key.data;
         entry.key_size = key.size;
 
         DEBUG2("LINE %d put\r\n", __LINE__);
@@ -695,7 +694,6 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
 
         LOCK(handle->keydir);
         DEBUG("+++ itr\r\n");
-        bitcask_keydir* keydir = handle->keydir;
 
         // If a iterator thread is already active for this keydir, bail
         if (handle->iterating)
@@ -713,6 +711,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc, const ERL_NIF_TER
         }
 
         // TODO: Add new iterator creation here.
+        return enif_make_badarg(env);
     }
     else
     {
@@ -727,7 +726,6 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
     if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
     {
         DEBUG("+++ itr next\r\n");
-        bitcask_keydir* keydir = handle->keydir;
 
         if (handle->iterating != 1)
         {
