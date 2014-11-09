@@ -258,6 +258,8 @@ int keydir_common_init(bitcask_keydir * keydir,
         return ret_code;
     }
 
+    keydir->fstats = kh_init(fstats);
+
     return 0; // Sweet success!!
 }
 
