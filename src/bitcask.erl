@@ -1262,7 +1262,9 @@ init_keydir(Dirname, WaitTime, ReadWriteModeP, KT) ->
                     {error, timeout};
                 _ ->
                     init_keydir(Dirname, WaitTime - 100, ReadWriteModeP, KT)
-            end
+            end;
+        {error, Err} ->
+            {error, Err}
     end.
 
 init_keydir_scan_key_files(Dirname, KeyDir, KT) ->

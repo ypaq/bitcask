@@ -305,16 +305,28 @@ static ErlNifFunc nif_funcs[] =
 
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
+    int init_result;
     // First, setup a resource for our handle
-    bitcask_keydir_handle* handle = enif_alloc_resource_compat(env,
-                                                               bitcask_keydir_RESOURCE,
-                                                               sizeof(bitcask_keydir_handle));
+    bitcask_keydir_handle* handle =
+        enif_alloc_resource_compat(env,
+                                   bitcask_keydir_RESOURCE,
+                                   sizeof(bitcask_keydir_handle));
+
     memset(handle, '\0', sizeof(bitcask_keydir_handle));
 
     // Now allocate the actual keydir instance. Because it's unnamed/shared, we'll
     // leave the name and lock portions null'd out
     bitcask_keydir* keydir = malloc(sizeof(bitcask_keydir));
     memset(keydir, '\0', sizeof(bitcask_keydir));
+
+    init_result = keydir_common_init(keydir, ".", 1024, 1024);
+
+    if (init_result)
+    {
+        free(keydir);
+        enif_release_resource_compat(env, handle);
+        return enif_make_tuple2(env, ATOM_ERROR, errno_atom(env, init_result));
+    }
 
     // Assign the keydir to our handle and hand it back
     handle->keydir = keydir;
@@ -383,15 +395,22 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
         }
         else
         {
+            int init_ret;
+
             // No such keydir, create a new one and add to the globals list. Make sure
             // to allocate enough room for the name.
             keydir = malloc(sizeof(bitcask_keydir) + name_sz + 1);
             memset(keydir, '\0', sizeof(bitcask_keydir) + name_sz + 1);
             strncpy(keydir->name, name, name_sz + 1);
 
-            // Be sure to initialize the mutex and set our refcount
-
-            keydir_common_init(keydir, ".", 1024, 1024);
+            init_ret = keydir_common_init(keydir, ".", 1024, 1024);
+            if (init_ret)
+            {
+                ERL_NIF_TERM error_code = errno_atom(env, init_ret);
+                free(keydir);
+                enif_mutex_unlock(priv->global_keydirs_lock);
+                return enif_make_tuple2(env, ATOM_ERROR, error_code);
+            }
 
             // Finally, register this new keydir in the globals
             kh_put2(global_keydirs, priv->global_keydirs, keydir->name, keydir);

@@ -174,6 +174,7 @@ int keydir_common_init(bitcask_keydir * keydir,
 {
     char swap_path[KEYDIR_INIT_PATH_BUFFER_LENGTH];
     int ret_code;
+    off_t swap_file_size;
 
     // Avoid unitialized pointers in case we call keydir_free_memory()
     keydir->mutex = NULL;
@@ -229,7 +230,7 @@ int keydir_common_init(bitcask_keydir * keydir,
 
     strcpy(swap_path, basedir);
     strcat(swap_path, "/bitcask.swap");
-    keydir->swap_file_desc = open(swap_path, O_CREAT|O_TRUNC, 0600);
+    keydir->swap_file_desc = open(swap_path, O_CREAT|O_TRUNC|O_RDWR, 0600);
 
     if (keydir->swap_file_desc < 0)
     {
@@ -248,7 +249,9 @@ int keydir_common_init(bitcask_keydir * keydir,
     }
 #endif
     
-    if (ftruncate(keydir->swap_file_desc, initial_num_swap_pages * PAGE_SIZE))
+    swap_file_size = initial_num_swap_pages * PAGE_SIZE;
+
+    if (ftruncate(keydir->swap_file_desc, swap_file_size))
     {
         ret_code = errno;
         keydir_free_memory(keydir);
@@ -805,16 +808,14 @@ static page_t * get_page(bitcask_keydir * keydir,
 static int lock_pages_to_scan_entry(bitcask_keydir * keydir,
                                     scan_iter_t * iter)
 {
-    uint32_t needed_pages, extra_pages, key_size;
+    uint32_t needed_pages, key_size;
 
     needed_pages = (iter->offset + ENTRY_KEY_OFFSET) / PAGE_SIZE + 1;
 
     // First allocate all pages to include this entry up to the key start.
     if (needed_pages > iter->num_pages)
     {
-        extra_pages = needed_pages - iter->num_pages;
-
-        if (extend_iter_chain(keydir, iter, extra_pages))
+        if (extend_iter_chain(keydir, iter, needed_pages - iter->num_pages))
         {
             return ENOMEM;
         }
@@ -822,7 +823,8 @@ static int lock_pages_to_scan_entry(bitcask_keydir * keydir,
 
     // Read the key size and allocate any extra pages needed to include it.
     key_size     = scan_get_key_size(iter);
-    needed_pages = (iter->offset + ENTRY_KEY_OFFSET + key_size) / PAGE_SIZE;
+    needed_pages = (iter->offset + ENTRY_KEY_OFFSET + key_size) / PAGE_SIZE
+        + 1;
     if (extend_iter_chain(keydir, iter, needed_pages - iter->num_pages))
     {
         return ENOMEM;
@@ -862,6 +864,11 @@ static int scan_keys_equal(const uint8_t * key,
     uint32_t remaining = key_size;
     int len = PAGE_SIZE - page_offset; // potentially rest of first page
     uint8_t * entry_key = iter->pages[page_idx].page->data + page_offset;
+
+    if (len > remaining)
+    {
+        len = remaining;
+    }
 
     if (strncmp((char*)key, (const char*)entry_key, len) != 0)
     {
@@ -1173,7 +1180,8 @@ static WritePrepCode reclaim_borrowed_page(bitcask_keydir * keydir,
 }
 
 /*
- * Prepare chain to do a write.
+ * Prepare chain to append a new entry.
+ * The chain size will be updated. The caller just needs to fill it up.
  * If base page is free, remove from free list.
  * If base page is borrowed, need to claim it and find home to previous tenant.
  * If no space for new entry, allocate extra pages.
@@ -1213,6 +1221,7 @@ static WritePrepCode write_prep(bitcask_keydir *   keydir,
         return WRITE_PREP_NO_MEM;
     }
 
+    base_page->size = wanted_size;
     return WRITE_PREP_OK;
 }
 
@@ -1262,13 +1271,13 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
                          uint64_t         old_offset)
 {
     scan_iter_t iter;
-    uint64_t epoch, chain_size;
+    uint64_t chain_size;
     KeydirPutCode ret_code = KEYDIR_PUT_OK;
 
     while (1)
     {
-        epoch = bc_atomic_incr64(&keydir->epoch);
-        scan_for_key(keydir, entry->key, entry->key_size, epoch, &iter);
+        entry->epoch = bc_atomic_incr64(&keydir->epoch);
+        scan_for_key(keydir, entry->key, entry->key_size, entry->epoch, &iter);
 
         if (iter.found)
         {
@@ -1283,7 +1292,7 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
             {
                 ret_code = KEYDIR_PUT_MODIFIED;
             }
-            else if (keydir->min_epoch > epoch)
+            else if (keydir->min_epoch > entry->epoch)
             {
                 update_entry(&iter, entry);
             }
