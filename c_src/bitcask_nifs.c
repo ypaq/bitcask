@@ -274,7 +274,7 @@ static ErlNifFunc nif_funcs[] =
     {"keydir_get_epoch", 1, bitcask_nifs_keydir_get_epoch},
     {"keydir_remove", 2, bitcask_nifs_keydir_remove},
     {"keydir_remove_int", 4, bitcask_nifs_keydir_remove},
-    {"keydir_itr_int", 4, bitcask_nifs_keydir_itr},
+    {"keydir_itr", 4, bitcask_nifs_keydir_itr},
     {"keydir_itr_next_int", 1, bitcask_nifs_keydir_itr_next},
     {"keydir_itr_release", 1, bitcask_nifs_keydir_itr_release},
     {"keydir_info", 1, bitcask_nifs_keydir_info},
@@ -756,6 +756,26 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
         }
 
         // TODO: Add new iterator next operation here
+
+        /*
+        switch(keydir_itr_next(
+        if
+        // Alloc the binary and make sure it succeeded
+        if (!enif_alloc_binary_compat(env, proxy.key_sz, &key))
+        {
+            return ATOM_ALLOCATION_ERROR;
+        }
+
+        // Copy the data from our key to the new allocated binary
+        memcpy(key.data, proxy.key, proxy.key_sz);
+        ERL_NIF_TERM curr = enif_make_tuple6(env,
+                                             ATOM_BITCASK_ENTRY,
+                                             enif_make_binary(env, &key),
+                                             enif_make_uint(env, proxy.file_id),
+                                             enif_make_uint(env, proxy.total_sz),
+                                             enif_make_uint64_bin(env, proxy.offset),
+                                             enif_make_uint(env, proxy.tstamp));
+                                             */
 
         // The iterator is at the end of the table
         return ATOM_NOT_FOUND;
@@ -1589,6 +1609,9 @@ static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
     {
         free_keydir(keydir);
     }
+
+    free_fstats(handle->fstats);
+    enif_mutex_destroy(handle->fstats_mutex);
 }
 
 static void bitcask_nifs_lock_resource_cleanup(ErlNifEnv* env, void* arg)

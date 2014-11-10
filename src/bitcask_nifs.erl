@@ -32,7 +32,7 @@
          keydir_get_epoch/1,
          keydir_remove/2, keydir_remove/4,
          keydir_fold/5,
-         keydir_itr/3,
+         keydir_itr/1,
          keydir_itr_next/1,
          keydir_itr_release/1,
          keydir_frozen/4,
@@ -194,13 +194,9 @@ keydir_remove(Ref, Key, FileId, Offset) ->
 keydir_remove_int(_Ref, _Key, _FileId, _Offset) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_itr(reference(), integer(), integer()) ->
-        ok | out_of_date | {error, iteration_in_process}.
-keydir_itr(Ref, MaxAge, MaxPuts) ->
-    TS = bitcask_time:tstamp(),
-    keydir_itr_int(Ref, TS, MaxAge, MaxPuts).
-
-keydir_itr_int(_Ref, _Ts, _MaxAge, _MaxPuts) ->
+-spec keydir_itr(reference()) ->
+        ok.
+keydir_itr(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_itr_next(reference()) ->
@@ -260,23 +256,6 @@ keydir_frozen(Ref, FrozenFun, MaxAge, MaxPuts) ->
             end;
         {error, Reason} ->
             {error, Reason}
-    end.
-
-%% Wait for any pending interation to complete
-keydir_wait_pending(Ref) ->
-    %% Create an iterator, passing a zero timestamp to force waiting for
-    %% any current iteration to complete
-    case keydir_itr_int(Ref, 0, 0, 0) of
-        out_of_date -> % no iter created, wait for message from last fold_keys
-            receive
-                ready ->
-                    ok;
-                error ->
-                    {error, shutdown}
-            end;
-        ok ->
-            keydir_itr_release(Ref),
-            ok
     end.
 
 -ifdef(PULSE).

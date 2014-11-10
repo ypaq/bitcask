@@ -66,6 +66,16 @@ KHASH_MAP_INIT_INT(fstats, bitcask_fstats_entry*);
 
 typedef khash_t(fstats) fstats_hash_t;
 
+typedef struct keydir_itr_struct keydir_itr_t;
+
+typedef struct
+{
+    keydir_itr_t * itr;
+    uint32_t offset;
+    uint32_t num_visited_offsets;
+    uint32_t * visited_offsets;
+} itr_visit_t;
+
 // Make sure fields are aligned properly on the page structs!
 // Don't modify willy-nilly!
 
@@ -77,6 +87,7 @@ typedef struct
     uint32_t        next;
     uint32_t        next_free;
     uint8_t         is_free;
+    itr_visit_t *   itr_visits;
 } page_t;
 
 typedef struct
@@ -86,6 +97,7 @@ typedef struct
     uint32_t alt_idx;
     uint32_t dead_bytes;
     uint8_t  is_borrowed;
+
 } mem_page_t;
 
 struct swap_array_struct
@@ -96,6 +108,7 @@ struct swap_array_struct
 };
 
 typedef struct swap_array_struct swap_array_t;
+
 
 typedef struct
 {
@@ -117,32 +130,15 @@ typedef struct
     volatile uint64_t key_bytes;
     fstats_hash_t*    fstats;
 
-    int               num_iterators;
+    unsigned          itr_count;
+    unsigned          itr_array_size;
+    keydir_itr_t **   itr_array;
+
     uint32_t          biggest_file_id;
-    unsigned int      refcount;
+    unsigned          refcount;
     char              is_ready;
     char              name[0];
 } bitcask_keydir;
-
-// Per page info in iterators.
-typedef struct
-{
-    page_t *        page;
-    mem_page_t *    mem_page;
-    uint32_t        page_idx;
-} page_info_t;
-
-#define SCAN_INITIAL_PAGE_ARRAY_SIZE 16
-
-typedef struct
-{
-    int                 found;
-    uint32_t            offset;
-    uint32_t            num_pages;
-    uint32_t            page_array_size;
-    page_info_t *       pages;
-    page_info_t         pages0[SCAN_INITIAL_PAGE_ARRAY_SIZE];
-} scan_iter_t;
 
 /////////////////////////////////////////////////////////////////////////
 // Public Keydir API
@@ -151,6 +147,8 @@ int keydir_common_init(bitcask_keydir * keydir,
                                const char * basedir,
                                uint32_t num_pages,
                                uint32_t initial_num_swap_pages);
+
+void free_keydir(bitcask_keydir* keydir);
 
 void update_fstats(fstats_hash_t * fstats,
                    ErlNifMutex * mutex,
@@ -163,7 +161,7 @@ void update_fstats(fstats_hash_t * fstats,
                    int32_t total_bytes_increment,
                    int32_t should_create);
 
-void free_keydir(bitcask_keydir* keydir);
+void free_fstats(fstats_hash_t * fstats);
 
 typedef enum {
     KEYDIR_GET_FOUND = 0,
@@ -194,5 +192,42 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
                             // conditional remove options
                             uint32_t old_file_id,
                             uint64_t old_offset);
+
+//////////////////////////////////////////////////////////
+// Iterators
+struct keydir_itr_struct
+{
+    bitcask_keydir * keydir;
+    // Defines the snapshot to iterate over. If set to MAX_EPOCH, the most
+    // recent entries will be observed in an undefined order.
+    uint64_t epoch;
+    // Page we are currently visiting. If MAX_PAGE_IDX, iteration has not
+    // started. If equal to keydir->num_pages, iteration has ended. 
+    uint32_t page_idx;
+};
+
+typedef enum {
+    KEYDIR_ITR_NO_SNAPSHOT = 0,
+    KEYDIR_ITR_USE_SNAPSHOT = 1
+} KeydirItrSnapshotFlag;
+
+keydir_itr_t * keydir_itr_create(bitcask_keydir * keydir,
+                                 KeydirItrSnapshotFlag snapshot_flag);
+
+void keydir_itr_init(bitcask_keydir * keydir,
+                     KeydirItrSnapshotFlag snapshot_flag,
+                     keydir_itr_t * itr);
+
+typedef enum {
+    KEYDIR_ITR_OK = 0,
+    KEYDIR_ITR_END,
+    KEYDIR_ITR_INVALID,
+    KEYDIR_ITR_OUT_OF_MEMORY
+} KeydirItrCode;
+
+KeydirItrCode keydir_itr_next(keydir_itr_t * keydir_itr,
+                              keydir_entry_t * entry);
+
+void keydir_itr_release(keydir_itr_t * keydir_itr);
 
 #endif
