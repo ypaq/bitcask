@@ -68,14 +68,6 @@ typedef khash_t(fstats) fstats_hash_t;
 
 typedef struct keydir_itr_struct keydir_itr_t;
 
-typedef struct
-{
-    keydir_itr_t * itr;
-    uint32_t offset;
-    uint32_t num_visited_offsets;
-    uint32_t * visited_offsets;
-} itr_visit_t;
-
 // Make sure fields are aligned properly on the page structs!
 // Don't modify willy-nilly!
 
@@ -87,17 +79,24 @@ typedef struct
     uint32_t        next;
     uint32_t        next_free;
     uint8_t         is_free;
-    itr_visit_t *   itr_visits;
 } page_t;
 
 typedef struct
 {
-    page_t   page;
-    uint32_t size;
-    uint32_t alt_idx;
-    uint32_t dead_bytes;
-    uint8_t  is_borrowed;
+    unsigned        count;
+    unsigned        size;
+    keydir_itr_t ** items;
+} keydir_itr_array_t;
 
+
+typedef struct
+{
+    page_t          page;
+    uint32_t        size;
+    uint32_t        alt_idx;
+    uint32_t        dead_bytes;
+    uint8_t         is_borrowed;
+    keydir_itr_array_t itr_array;
 } mem_page_t;
 
 struct swap_array_struct
@@ -130,9 +129,7 @@ typedef struct
     volatile uint64_t key_bytes;
     fstats_hash_t*    fstats;
 
-    unsigned          itr_count;
-    unsigned          itr_array_size;
-    keydir_itr_t **   itr_array;
+    keydir_itr_array_t itr_array;
 
     uint32_t          biggest_file_id;
     unsigned          refcount;
@@ -204,6 +201,9 @@ struct keydir_itr_struct
     // Page we are currently visiting. If MAX_PAGE_IDX, iteration has not
     // started. If equal to keydir->num_pages, iteration has ended. 
     uint32_t page_idx;
+    uint32_t offset;
+    uint32_t num_visited_offsets;
+    uint32_t * visited_offsets;
 };
 
 typedef enum {

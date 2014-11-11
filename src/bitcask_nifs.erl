@@ -31,12 +31,11 @@
          keydir_get/3,
          keydir_get_epoch/1,
          keydir_remove/2, keydir_remove/4,
-         keydir_fold/5,
+         keydir_fold/3,
          keydir_itr/1,
          keydir_itr_next/1,
          keydir_itr_release/1,
-         keydir_frozen/4,
-         keydir_wait_pending/1,
+         keydir_frozen/2,
          keydir_info/1,
          keydir_release/1,
          increment_file_id/1,
@@ -200,18 +199,8 @@ keydir_itr(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_itr_next(reference()) ->
-        #bitcask_entry{} |
-        {error, iteration_not_started} | allocation_error | not_found.
-keydir_itr_next(Ref) ->
-    case keydir_itr_next_int(Ref) of
-        E when is_record(E, bitcask_entry) ->
-            <<Offset:64/unsigned-native>> = E#bitcask_entry.offset,
-            E#bitcask_entry { offset = Offset };
-        Other ->
-            Other
-    end.
-
-keydir_itr_next_int(_Ref) ->
+        #bitcask_entry{} | allocation_error | not_found.
+keydir_itr_next(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_itr_release(reference()) ->
@@ -229,25 +218,17 @@ increment_file_id(_Ref) ->
 increment_file_id(_Ref, _ConditionalFileId) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_fold(reference(), fun((any(), any()) -> any()), any(),
-                  integer(), integer()) ->
+-spec keydir_fold(reference(), fun((any(), any()) -> any()), any()) ->
         any() | {error, any()}.
-keydir_fold(Ref, Fun, Acc0, MaxAge, MaxPuts) ->
+keydir_fold(Ref, Fun, Acc0) ->
     FrozenFun = fun() ->
                         keydir_fold_cont(keydir_itr_next(Ref), Ref, Fun, Acc0)
                 end,
-    keydir_frozen(Ref, FrozenFun, MaxAge, MaxPuts).
+    keydir_frozen(Ref, FrozenFun).
 
 %% Execute the function once the keydir is frozen
-keydir_frozen(Ref, FrozenFun, MaxAge, MaxPuts) ->
-    case keydir_itr(Ref, MaxAge, MaxPuts) of
-        out_of_date ->
-            case keydir_wait_ready() of
-                ok ->
-                    keydir_frozen(Ref, FrozenFun, -1, -1);
-                Else ->
-                    Else
-            end;
+keydir_frozen(Ref, FrozenFun) ->
+    case keydir_itr(Ref) of
         ok ->
             try
                 FrozenFun()
@@ -257,37 +238,6 @@ keydir_frozen(Ref, FrozenFun, MaxAge, MaxPuts) ->
         {error, Reason} ->
             {error, Reason}
     end.
-
--ifdef(PULSE).
-keydir_wait_ready() ->
-    keydir_wait_ready(100).
-
-keydir_wait_ready(0) ->
-    error({bummer, ?MODULE, "keydir_wait_ready: too deep"});
-keydir_wait_ready(N) ->
-    receive
-        ready -> % fold no matter what on second attempt
-            ok;
-        error ->
-            {error, shutdown}
-    after 1000 ->
-            case N =< 99 of
-                true ->
-                    erlang:display({?MODULE,?LINE,keydir_wait_ready,retry,N});
-                false ->
-                    ok
-            end,
-            keydir_wait_ready(N-1)
-    end.
--else.
-keydir_wait_ready() ->
-    receive
-        ready -> % fold no matter what on second attempt
-            ok;
-        error ->
-            {error, shutdown}
-    end.
--endif.
 
 -spec keydir_info(reference()) ->
         {integer(), integer(),
@@ -491,7 +441,7 @@ keydir_itr_test_base(Ref) ->
 
     {3, 9, _, _, _} = keydir_info(Ref),
 
-    List = keydir_fold(Ref, fun(E, Acc) -> [ E | Acc] end, [], -1, -1),
+    List = keydir_fold(Ref, fun(E, Acc) -> [ E | Acc] end, []),
     3 = length(List),
     true = lists:keymember(<<"abc">>, #bitcask_entry.key, List),
     true = lists:keymember(<<"def">>, #bitcask_entry.key, List),
@@ -536,8 +486,8 @@ keydir_double_itr_test_() -> % check iterating flag is cleared
 keydir_double_itr_test2() ->
     {ok, Ref1} = keydir_new(),
     Folder = fun(_,Acc) -> Acc end,
-    ?assertEqual(acc, keydir_fold(Ref1, Folder, acc, -1, -1)),
-    ?assertEqual(acc, keydir_fold(Ref1, Folder, acc, -1, -1)).
+    ?assertEqual(acc, keydir_fold(Ref1, Folder, acc)),
+    ?assertEqual(acc, keydir_fold(Ref1, Folder, acc)).
 
 keydir_next_notstarted_error_test_() ->
     {timeout, 60, fun keydir_next_notstarted_error_test2/0}.
@@ -735,44 +685,6 @@ clear_recv_buffer(Ct) ->
     after 0 ->
             ok %%?debugFmt("cleared ~p msgs", [Ct])
     end.
-
-keydir_wait_pending_test_() ->
-    {timeout, 60, fun keydir_wait_pending_test2/0}.
-
-keydir_wait_pending_test2() ->
-    clear_recv_buffer(0),
-    Name = "keydir_wait_pending_test",
-    {not_ready, Ref1} = keydir_new(Name),
-    keydir_mark_ready(Ref1),
-
-    %% Begin iterating
-    ok = bitcask_nifs:keydir_itr(Ref1, 0, 0),
-    put_till_frozen(Ref1, Name),
-    %% Spawn a process to wait on pending
-    Me = self(),
-    F = fun() ->
-                {ready, Ref2} = keydir_new(Name),
-                Me ! waiting,
-                keydir_wait_pending(Ref2),
-                Me ! waited
-        end,
-    spawn(F),
-
-    %% Make sure it starts
-    ok = receive waiting -> ok
-         after   1000 -> start_err
-         end,
-    %% Give it a chance to call keydir_wait_pending then blocks
-    timer:sleep(200),
-    nothing = receive Msg -> {msg, Msg}
-              after  1000 -> nothing
-        end,
-
-    %% End iterating - make sure the waiter wakes up
-    keydir_itr_release(Ref1),
-    ok = receive waited -> ok
-         after  1000 -> timeout_err
-         end.
 
 
 -ifdef(EQC).

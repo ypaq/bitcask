@@ -39,6 +39,9 @@
 #define ENTRY_KEY_SIZE_OFFSET 32
 #define ENTRY_KEY_OFFSET 36
 
+// The size of a zero length key entry
+#define BASE_ENTRY_SIZE ENTRY_KEY_OFFSET
+
 #define PAGE_SIZE 4096
 
 #define kh_put2(name, h, k, v) {                        \
@@ -48,11 +51,18 @@
 
 static void free_swap_array(swap_array_t * swap_array)
 {
+    uint32_t idx;
+
     if (swap_array)
     {
         if (swap_array->next)
         {
             free_swap_array(swap_array->next);
+        }
+
+        for (idx = 0; idx < swap_array->size; ++idx)
+        {
+            munmap(swap_array->pages[idx].data, PAGE_SIZE);
         }
 
         free(swap_array->pages);
@@ -82,7 +92,7 @@ void free_fstats(fstats_hash_t * fstats)
 
 static void keydir_free_memory(bitcask_keydir * keydir)
 {
-    free_fstats(keydir->fstats);
+    uint32_t idx;
 
     if (keydir->swap_file_desc > -1)
     {
@@ -92,9 +102,15 @@ static void keydir_free_memory(bitcask_keydir * keydir)
         close(keydir->swap_file_desc);
     }
 
-    free_swap_array(keydir->swap_pages);
+
+    for(idx = 0; idx < keydir->num_pages; ++idx)
+    {
+        free(keydir->mem_pages[idx].itr_array.items);
+    }
+
     free(keydir->mem_pages);
     free(keydir->buffer);
+    free_swap_array(keydir->swap_pages);
 
     if (keydir->mutex)
     {
@@ -108,6 +124,7 @@ static void keydir_free_memory(bitcask_keydir * keydir)
         keydir->swap_grow_mutex = NULL;
     }
 
+    free_fstats(keydir->fstats);
     keydir->fstats = NULL;
     keydir->swap_pages = NULL;
     keydir->mem_pages = NULL;
@@ -163,6 +180,10 @@ void keydir_init_mem_pages(bitcask_keydir * keydir)
         p->alt_idx = MAX_PAGE_IDX;
         p->dead_bytes = 0;
         p->is_borrowed = 0;
+
+        p->itr_array.count = 0;
+        p->itr_array.size = 0;
+        p->itr_array.items = NULL;
     }
 }
 
@@ -189,9 +210,10 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->swap_pages = NULL;
 
 
-    keydir->itr_array = NULL;
-    keydir->itr_count = 0;
-    keydir->itr_array_size = 0;
+    keydir->itr_array.items = NULL;
+    keydir->itr_array.count = 0;
+    keydir->itr_array.size = 0;
+
     keydir->refcount = 1;
     keydir->num_pages = num_pages;
     keydir->num_swap_pages = initial_num_swap_pages;
@@ -865,10 +887,25 @@ static int lock_pages_to_scan_entry(bitcask_keydir * keydir,
 }
 
 static void init_scan_iterator(scan_iter_t * scan_iter,
-                               uint32_t base_idx,
-                               page_t * first_page,
-                               mem_page_t * first_mem_page)
+                               bitcask_keydir * keydir,
+                               uint32_t base_idx)
 {
+    page_t * first_page;
+
+    mem_page_t * first_mem_page = keydir->mem_pages + base_idx;
+    enif_mutex_lock(first_mem_page->page.mutex);
+
+    if (first_mem_page->alt_idx == MAX_PAGE_IDX)
+    {
+        first_page = &first_mem_page->page;
+    }
+    else // Page has been moved to swap.
+    {
+        first_page = get_swap_page(first_mem_page->alt_idx, keydir->swap_pages);
+        enif_mutex_lock(first_page->mutex);
+        enif_mutex_unlock(first_mem_page->page.mutex);
+    }
+
     scan_iter->found = 0;
     scan_iter->offset = 0;
     scan_iter->num_pages = 1;
@@ -1084,26 +1121,9 @@ static void scan_for_key(bitcask_keydir *  keydir,
                          uint64_t          epoch,
                          scan_iter_t *     scan_iter)
 {
-    uint32_t base_idx;
-    mem_page_t * base_page;
-    page_t * first_page;
-   
-    base_idx = hash_key(key, key_size) % keydir->num_pages;
-    base_page = keydir->mem_pages + base_idx;
-    enif_mutex_lock(base_page->page.mutex);
+    uint32_t base_idx = hash_key(key, key_size) % keydir->num_pages;
 
-    if (base_page->alt_idx == MAX_PAGE_IDX)
-    {
-        first_page = &base_page->page;
-    }
-    else // Page has been moved to swap.
-    {
-        first_page = get_swap_page(base_page->alt_idx, keydir->swap_pages);
-        enif_mutex_lock(first_page->mutex);
-        enif_mutex_unlock(base_page->page.mutex);
-    }
-
-    init_scan_iterator(scan_iter, base_idx, first_page, base_page);
+    init_scan_iterator(scan_iter, keydir, base_idx);
     scan_pages(keydir, key, key_size, epoch, scan_iter);
 }
 
@@ -1480,58 +1500,61 @@ void free_keydir(bitcask_keydir* keydir)
 
 #define INITIAL_ITER_ARRAY_SIZE 16
 
-static int maybe_expand_itr_array(bitcask_keydir * keydir)
+static int maybe_expand_itr_array(keydir_itr_array_t * itr_array)
 {
 
-    if (keydir->itr_array_size > keydir->itr_count)
+    if (itr_array->size > itr_array->count)
     {
         return 0;
     }
 
-    if (keydir->itr_array_size == 0)
+    if (itr_array->size == 0)
     {
-        keydir->itr_array_size = INITIAL_ITER_ARRAY_SIZE;
-        keydir->itr_array = malloc(sizeof(keydir_itr_t*)
-                                   * keydir->itr_array_size);
+        itr_array->size = INITIAL_ITER_ARRAY_SIZE;
+        itr_array->items = malloc(sizeof(keydir_itr_t*)
+                                         * itr_array->size);
     }
     else
     {
         keydir_itr_t ** tmp_array;
 
-        keydir->itr_array_size *= 2;
-        tmp_array = realloc(keydir->itr_array,
-                            sizeof(keydir_itr_t*) * keydir->itr_array_size);
+        itr_array->size *= 2;
+        tmp_array = realloc(itr_array->items,
+                            sizeof(keydir_itr_t*) * itr_array->size);
         if (!tmp_array)
         {
             return ENOMEM;
         }
 
-        keydir->itr_array = tmp_array;
+        itr_array->items = tmp_array;
     }
 
     return 0;
 }
 
-static void itr_array_insert(bitcask_keydir * keydir,
+static void itr_array_insert(keydir_itr_array_t * itr_array,
                              keydir_itr_t * itr)
 {
     unsigned i;
-    maybe_expand_itr_array(keydir);
+    maybe_expand_itr_array(itr_array);
 
-    if (keydir->itr_count == 0)
+    if (itr_array->count == 0)
     {
-        keydir->itr_array[0] = itr;
-        ++keydir->itr_count;
+        itr_array->items[0] = itr;
+        ++itr_array->count;
         return;
     }
 
-    i = keydir->itr_count;
+    // List is in ascending epoch order, and epochs grow monotonically,
+    // so inserts go at the end or near it.
+    i = itr_array->count;
     do {
-        if (keydir->itr_array[i-1]->epoch <= itr->epoch)
+        if (itr_array->items[i-1]->epoch <= itr->epoch)
         {
-            memmove(keydir->itr_array + i + 1, keydir->itr_array + i,
-                    sizeof(keydir_itr_t*) * (keydir->itr_count - i));
-            keydir->itr_array[i] = itr;
+            memmove(itr_array->items + i + 1, itr_array->items + i,
+                    sizeof(keydir_itr_t*) * (itr_array->count - i));
+            itr_array->items[i] = itr;
+            ++itr_array->count;
             return;
         }
     } while(--i > 0);
@@ -1544,6 +1567,9 @@ void keydir_itr_init(bitcask_keydir * keydir,
     enif_mutex_lock(keydir->mutex);
     itr->keydir = keydir;
     itr->page_idx = MAX_PAGE_IDX;
+    itr->offset = 0;
+    itr->num_visited_offsets = 0;
+    itr->visited_offsets = NULL;
 
     if (snapshot_flag == KEYDIR_ITR_NO_SNAPSHOT)
     {
@@ -1555,7 +1581,7 @@ void keydir_itr_init(bitcask_keydir * keydir,
     }
 
     // Ensure space for another iterator
-    itr_array_insert(keydir, itr);
+    itr_array_insert(&keydir->itr_array, itr);
 
     if (keydir->min_epoch > itr->epoch)
     {
@@ -1574,14 +1600,14 @@ keydir_itr_t * keydir_itr_create(bitcask_keydir * keydir,
     return itr;
 }
 
-static void itr_array_delete(bitcask_keydir * keydir,
+static void itr_array_delete(keydir_itr_array_t * itr_array,
                              keydir_itr_t * itr)
 {
-    unsigned i, last_i = keydir->itr_count - 1;
-    keydir_itr_t ** p = keydir->itr_array;
+    unsigned i, last_i = itr_array->count - 1;
+    keydir_itr_t ** p = itr_array->items;
 
-    // TODO: Switch to binary search
-    for (i = 0; i < keydir->itr_count; ++i, ++p)
+    // TODO: Switch to binary search to handle large numbers of iterators.
+    for (i = 0; i < itr_array->count; ++i, ++p)
     {
         if (*p == itr)
         {
@@ -1589,7 +1615,7 @@ static void itr_array_delete(bitcask_keydir * keydir,
             {
                 memmove(p, p + 1, sizeof(keydir_itr_t*) * (last_i - i));
             }
-            --keydir->itr_count;
+            --itr_array->count;
         }
     }
 }
@@ -1598,37 +1624,50 @@ void keydir_itr_release(keydir_itr_t * itr)
 {
     if (itr->keydir)
     {
+        bitcask_keydir * keydir = itr->keydir;
 
-        enif_mutex_lock(itr->keydir->mutex);
-
-        itr_array_delete(itr->keydir, itr);
+        enif_mutex_lock(keydir->mutex);
+        itr_array_delete(&keydir->itr_array, itr);
 
         // Are we the lowest epoch? if so, update.
-        if (itr->keydir->min_epoch != MAX_EPOCH
-            && itr->keydir->min_epoch == itr->epoch)
+        if (keydir->min_epoch != MAX_EPOCH
+            && keydir->min_epoch == itr->epoch)
         {
-            
+            if (keydir->itr_array.count == 0)
+            {
+                keydir->min_epoch = MAX_EPOCH;
+            }
+            else
+            {
+                keydir->min_epoch = keydir->itr_array.items[0]->epoch;
+            }
         }
 
-        if (--itr->keydir->refcount == 0)
+        if (--keydir->refcount == 0)
         {
-            free_keydir(itr->keydir);
+            free_keydir(keydir);
         }
 
-        enif_mutex_unlock(itr->keydir->mutex);
-        itr->keydir = NULL;
+        free(itr->visited_offsets);
+        enif_mutex_unlock(keydir->mutex);
+        keydir = NULL;
     }
 }
 
 KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
                               keydir_entry_t * entry)
 {
-    if (!itr->keydir)
+    scan_iter_t scan_iter;
+    mem_page_t * base_page;
+    bitcask_keydir * keydir = itr->keydir;
+    int insert_in_page;
+
+    if (!keydir)
     {
         return KEYDIR_ITR_INVALID;
     }
 
-    if (itr->page_idx >= itr->keydir->num_pages)
+    if (itr->page_idx >= keydir->num_pages)
     {
         return KEYDIR_ITR_END;
     }
@@ -1636,8 +1675,91 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
     // If iteration not started, visit first page
     if (itr->page_idx == MAX_PAGE_IDX)
     {
+        insert_in_page = 1;
         itr->page_idx = 0;
     }
+    else
+    {
+        insert_in_page = 0;
+    }
 
-    return KEYDIR_ITR_OK;
+    while (1)
+    {
+        init_scan_iterator(&scan_iter, keydir, itr->page_idx);
+        scan_iter.offset = itr->offset;
+        base_page = scan_iter.pages[0].mem_page;
+
+        if (insert_in_page)
+        {
+            itr_array_insert(&base_page->itr_array, itr);
+        }
+
+        // If we come back here (move to next page), definitely insert.
+        insert_in_page = 1;
+
+        if (itr->offset >= base_page->size)
+        {
+            // move to next page
+            itr_array_delete(&base_page->itr_array, itr);
+            free_scan_iter(&scan_iter);
+
+            if (++itr->page_idx == keydir->num_pages)
+            {
+                return KEYDIR_ITR_END;
+            }
+            
+            continue; // Restart on next page.
+        }
+
+        while (1)
+        {
+            if (ENOMEM == lock_pages_to_scan_entry(keydir, &scan_iter))
+            {
+                free_scan_iter(&scan_iter);
+                return KEYDIR_ITR_OUT_OF_MEMORY;
+            }
+
+            entry->key_size = scan_get_key_size(&scan_iter);
+            // Skip extra versions (no key), just process base versions.
+            while (!entry->key_size)
+            {
+                scan_iter.offset += BASE_ENTRY_SIZE;
+
+                if (scan_iter.offset >= base_page->size)
+                {
+                    break; // Restart on next page.
+                }
+
+                entry->key_size = scan_get_key_size(&scan_iter);
+            }
+
+            itr->offset = scan_iter.offset;
+            if (itr->offset >= base_page->size)
+            {
+                // move to next page
+                itr_array_delete(&base_page->itr_array, itr);
+                free_scan_iter(&scan_iter);
+
+                if (++itr->page_idx == keydir->num_pages)
+                {
+                    return KEYDIR_ITR_END;
+                }
+
+                continue;
+            }
+
+            scan_to_epoch(keydir, &scan_iter, itr->epoch);
+            itr->offset += entry_size_for_key(entry->key_size);
+
+            if (scan_iter.found)
+            {
+                scan_iter_to_entry(&scan_iter, entry);
+                free_scan_iter(&scan_iter);
+
+                return KEYDIR_ITR_OK;
+            }
+
+            scan_iter.offset = itr->offset;
+        }
+    }
 }
