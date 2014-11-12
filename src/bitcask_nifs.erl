@@ -33,6 +33,7 @@
          keydir_remove/2, keydir_remove/4,
          keydir_fold/3,
          keydir_itr/1,
+         keydir_itr/2,
          keydir_itr_next/1,
          keydir_itr_release/1,
          keydir_frozen/2,
@@ -193,10 +194,15 @@ keydir_remove(Ref, Key, FileId, Offset) ->
 keydir_remove_int(_Ref, _Key, _FileId, _Offset) ->
     erlang:nif_error({error, not_loaded}).
 
+-spec keydir_itr(reference(), 0 | 1) ->
+        ok.
+keydir_itr(_Ref, _UseSnapshot) ->
+    erlang:nif_error({error, not_loaded}).
+
 -spec keydir_itr(reference()) ->
         ok.
-keydir_itr(_Ref) ->
-    erlang:nif_error({error, not_loaded}).
+keydir_itr(Ref) ->
+    keydir_itr(Ref, 1).
 
 -spec keydir_itr_next(reference()) ->
         #bitcask_entry{} | allocation_error | not_found.
@@ -229,11 +235,11 @@ keydir_fold(Ref, Fun, Acc0) ->
 %% Execute the function once the keydir is frozen
 keydir_frozen(Ref, FrozenFun) ->
     case keydir_itr(Ref) of
-        ok ->
+        Itr when is_reference(Itr) ->
             try
                 FrozenFun()
             after
-                keydir_itr_release(Ref)
+                keydir_itr_release(Itr)
             end;
         {error, Reason} ->
             {error, Reason}

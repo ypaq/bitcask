@@ -777,12 +777,15 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
             case KEYDIR_ITR_OK:
                 if (!enif_alloc_binary(entry.key_size, &key_binary))
                 {
+                    free(entry.key);
                     return enif_make_tuple2(env, ATOM_ERROR,
                                             ATOM_ALLOCATION_ERROR);
                 }
 
                 // Copy the data from our key to the new allocated binary
+                // TODO: Refactor to avoid temporary key buffer even if ugly
                 memcpy(key_binary.data, entry.key, entry.key_size);
+                free(entry.key);
                 return enif_make_tuple6(env,
                                         ATOM_BITCASK_ENTRY,
                                         enif_make_binary(env, &key_binary),

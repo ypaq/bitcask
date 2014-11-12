@@ -29,9 +29,9 @@
          delete/2,
          sync/1,
          list_keys/1,
-         fold_keys/3, fold_keys/6,
-         fold/3, fold/6,
-         iterator/3, iterator_next/1, iterator_release/1,
+         fold_keys/3, fold_keys/4,
+         fold/3, fold/4,
+         iterator/1, iterator_next/1, iterator_release/1,
          merge/1, merge/2, merge/3,
          needs_merge/1,
          needs_merge/2,
@@ -324,20 +324,16 @@ list_keys(Ref) ->
 %% @doc Fold over all keys in a bitcask datastore.
 %% Must be able to understand the bitcask_entry record form.
 -spec fold_keys(reference(), Fun::fun(), Acc::term()) ->
-                                                       term() | {error, any()}.
+    term() | {error, any()}.
 fold_keys(Ref, Fun, Acc0) ->
-    State = get_state(Ref),
-    MaxAge = get_opt(max_fold_age, State#bc_state.opts) * 1000, % convert from ms to us
-    MaxPuts = get_opt(max_fold_puts, State#bc_state.opts),
-    fold_keys(Ref, Fun, Acc0, MaxAge, MaxPuts, false).
+    fold_keys(Ref, Fun, Acc0, false).
 
 %% @doc Fold over all keys in a bitcask datastore with limits on how out of date
 %%      the keydir is allowed to be.
 %% Must be able to understand the bitcask_entry record form.
--spec fold_keys(reference(), Fun::fun(), Acc::term(), non_neg_integer() | undefined,
-                non_neg_integer() | undefined, boolean()) ->
-                                                term() | {error, any()}.
-fold_keys(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
+-spec fold_keys(reference(), Fun::fun(), Acc::term(), boolean()) ->
+    term() | {error, any()}.
+fold_keys(Ref, Fun, Acc0, SeeTombstonesP) ->
     %% Fun should be of the form F(#bitcask_entry, A) -> A
     ExpiryTime = expiry_time((get_state(Ref))#bc_state.opts),
     RealFun = fun(BCEntry, Acc) ->
@@ -362,7 +358,7 @@ fold_keys(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
                 end
         end
     end,
-    bitcask_nifs:keydir_fold((get_state(Ref))#bc_state.keydir, RealFun, Acc0, MaxAge, MaxPut).
+    bitcask_nifs:keydir_fold((get_state(Ref))#bc_state.keydir, RealFun, Acc0).
 
 %% @doc fold over all K/V pairs in a bitcask datastore.
 %% Fun is expected to take F(K,V,Acc0) -> Acc
@@ -373,21 +369,19 @@ fold(Ref, Fun, Acc0) when is_reference(Ref)->
     State = get_state(Ref),
     fold(State, Fun, Acc0);
 fold(State, Fun, Acc0) ->
-    MaxAge = get_opt(max_fold_age, State#bc_state.opts) * 1000, % convert from ms to us
-    MaxPuts = get_opt(max_fold_puts, State#bc_state.opts),
     SeeTombstonesP = get_opt(fold_tombstones, State#bc_state.opts) /= undefined,
-    fold(State, Fun, Acc0, MaxAge, MaxPuts, SeeTombstonesP).
+    fold(State, Fun, Acc0, SeeTombstonesP).
 
 %% @doc fold over all K/V pairs in a bitcask datastore specifying max age/updates of
 %% the frozen keystore.
 %% Fun is expected to take F(K,V,Acc0) -> Acc
 -spec fold(reference() | tuple(), fun((binary(), binary(), any()) -> any()), any(),
-           non_neg_integer() | undefined, non_neg_integer() | undefined, boolean()) -> 
+           boolean()) -> 
                   any() | {error, any()}.
-fold(Ref, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) when is_reference(Ref)->
+fold(Ref, Fun, Acc0, SeeTombstonesP) when is_reference(Ref)->
     State = get_state(Ref),
-    fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP);
-fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
+    fold(State, Fun, Acc0, SeeTombstonesP);
+fold(State, Fun, Acc0, SeeTombstonesP) ->
     KT = State#bc_state.key_transform,
     FrozenFun = 
         fun() ->
@@ -435,7 +429,7 @@ fold(State, Fun, Acc0, MaxAge, MaxPut, SeeTombstonesP) ->
                 end
         end,
     KeyDir = State#bc_state.keydir,
-    bitcask_nifs:keydir_frozen(KeyDir, FrozenFun, MaxAge, MaxPut).
+    bitcask_nifs:keydir_frozen(KeyDir, FrozenFun).
 
 %%
 %% Get a list of readable files and attempt to open them for a fold. If we can't
@@ -516,25 +510,23 @@ subfold(SubFun,[FD | Rest],Acc0) ->
     subfold(SubFun, Rest, Acc2).
 
 %% @doc Start entry iterator
--spec iterator(reference(), integer(), integer()) ->
-      ok | out_of_date | {error, iteration_in_process}.
-iterator(Ref, MaxAge, MaxPuts) ->
+-spec iterator(reference()) ->
+      reference() | out_of_date | {error, iteration_in_process}.
+iterator(Ref) ->
     KeyDir = (get_state(Ref))#bc_state.keydir,
-    bitcask_nifs:keydir_itr(KeyDir, MaxAge, MaxPuts).
+    bitcask_nifs:keydir_itr(KeyDir).
 
 %% @doc Get next entry from the iterator
 -spec iterator_next(reference()) ->
       #bitcask_entry{} |
      {error, iteration_not_started} | allocation_error | not_found.
-iterator_next(Ref) ->
-    KeyDir = (get_state(Ref))#bc_state.keydir,
-    bitcask_nifs:keydir_itr_next(KeyDir).
+iterator_next(Itr) ->
+    bitcask_nifs:keydir_itr_next(Itr).
 
 %% @doc Release iterator
 -spec iterator_release(reference()) -> ok.
-iterator_release(Ref) ->
-    KeyDir = (get_state(Ref))#bc_state.keydir,
-    bitcask_nifs:keydir_itr_release(KeyDir).
+iterator_release(Itr) ->
+    bitcask_nifs:keydir_itr_release(Itr).
 
 %% @doc Merge several data files within a bitcask datastore
 %%      into a more compact form.
@@ -2098,7 +2090,7 @@ iterator_test_() ->
 
 iterator_test2() ->
     B = init_dataset("/tmp/bc.iterator.test.fold", default_dataset()),
-    ok = iterator(B, 0, 0),
+    ok = iterator(B),
     Keys = [ begin #bitcask_entry{ key = Key } = iterator_next(B), Key end || 
              _ <- default_dataset() ],
     ?assertEqual(lists:sort(Keys), lists:sort([ Key  || {Key, _} <- default_dataset() ])), 

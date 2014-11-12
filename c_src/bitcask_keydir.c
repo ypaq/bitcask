@@ -521,8 +521,38 @@ static void scan_set_key(scan_iter_t * iter,
 
     while (remainder > 0)
     {
-        ++page_idx;
+        dst = iter->pages[++page_idx].page->data;
         src += section_size;
+        section_size = remainder > PAGE_SIZE ? PAGE_SIZE : remainder;
+        memcpy(dst, src, section_size);
+        remainder -= section_size;
+    }
+}
+
+/*
+ * Key should have enough space for key data.
+ */
+static void scan_get_key(scan_iter_t * iter, uint8_t * key)
+{
+    // Split key along potentially multiple pages.
+    // Pages are assumed to be already allocated.
+    int key_offset      = iter->offset + ENTRY_KEY_OFFSET;
+    uint32_t key_size   = scan_get_key_size(iter);
+    int page_idx        = key_offset / PAGE_SIZE;
+    int page_offset     = key_offset % PAGE_SIZE;
+    int space_in_page   = PAGE_SIZE - page_offset;
+    size_t section_size = key_size < space_in_page ? key_size : space_in_page;
+    uint32_t remainder  = key_size;
+    uint8_t * dst       = key;
+    const uint8_t * src = iter->pages[page_idx].page->data + page_offset;
+
+    memcpy(dst, src, section_size);
+    remainder -= section_size;
+
+    while (remainder > 0)
+    {
+        src = iter->pages[++page_idx].page->data;
+        dst += section_size;
         section_size = remainder > PAGE_SIZE ? PAGE_SIZE : remainder;
         memcpy(dst, src, section_size);
         remainder -= section_size;
@@ -1075,6 +1105,7 @@ static void scan_pages(bitcask_keydir * keydir,
 /*
  * Populate return entry fields from scan data.
  * It handles entries split across page boundaries.
+ * Notice that the key and its size are left out.
  */
 static void scan_iter_to_entry(scan_iter_t * iter,
                                keydir_entry_t * return_entry)
@@ -1667,7 +1698,7 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
         return KEYDIR_ITR_INVALID;
     }
 
-    if (itr->page_idx >= keydir->num_pages)
+    if (itr->page_idx == keydir->num_pages)
     {
         return KEYDIR_ITR_END;
     }
@@ -1708,6 +1739,7 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
                 return KEYDIR_ITR_END;
             }
             
+            itr->offset = 0;
             continue; // Restart on next page.
         }
 
@@ -1745,6 +1777,7 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
                     return KEYDIR_ITR_END;
                 }
 
+                itr->offset = 0;
                 continue;
             }
 
@@ -1754,6 +1787,11 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
             if (scan_iter.found)
             {
                 scan_iter_to_entry(&scan_iter, entry);
+                entry->key_size = scan_get_key_size(&scan_iter);
+                // TODO: Optimize to copy key only once if possible.
+                entry->key = malloc(entry->key_size);
+                scan_get_key(&scan_iter, entry->key);
+
                 free_scan_iter(&scan_iter);
 
                 return KEYDIR_ITR_OK;
