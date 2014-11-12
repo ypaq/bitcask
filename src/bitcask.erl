@@ -35,7 +35,6 @@
          merge/1, merge/2, merge/3,
          needs_merge/1,
          needs_merge/2,
-         is_frozen/1,
          is_empty_estimate/1,
          status/1]).
 
@@ -372,8 +371,7 @@ fold(State, Fun, Acc0) ->
     SeeTombstonesP = get_opt(fold_tombstones, State#bc_state.opts) /= undefined,
     fold(State, Fun, Acc0, SeeTombstonesP).
 
-%% @doc fold over all K/V pairs in a bitcask datastore specifying max age/updates of
-%% the frozen keystore.
+%% @doc fold over all K/V pairs in a bitcask datastore
 %% Fun is expected to take F(K,V,Acc0) -> Acc
 -spec fold(reference() | tuple(), fun((binary(), binary(), any()) -> any()), any(),
            boolean()) -> 
@@ -384,7 +382,7 @@ fold(Ref, Fun, Acc0, SeeTombstonesP) when is_reference(Ref)->
 fold(State, Fun, Acc0, SeeTombstonesP) ->
     KT = State#bc_state.key_transform,
     FrozenFun = 
-        fun() ->
+        fun(_Itr) ->
                 case open_fold_files(State#bc_state.dirname,
                                      State#bc_state.keydir,
                                      ?OPEN_FOLD_RETRIES) of
@@ -996,12 +994,6 @@ is_empty_estimate(Ref) ->
     State = get_state(Ref),
     {KeyCount, _, _, _, _} = bitcask_nifs:keydir_info(State#bc_state.keydir),
     KeyCount == 0.
-
--spec is_frozen(reference()) -> boolean().
-is_frozen(Ref) ->
-    #bc_state{keydir=Keydir} = get_state(Ref),
-    {_, _, _, {_, _, Frozen, _}, _} = bitcask_nifs:keydir_info(Keydir),
-    Frozen.
 
 -spec status(reference()) -> {integer(), [{string(), integer(), integer(), integer()}]}.
 status(Ref) ->
@@ -2090,11 +2082,11 @@ iterator_test_() ->
 
 iterator_test2() ->
     B = init_dataset("/tmp/bc.iterator.test.fold", default_dataset()),
-    ok = iterator(B),
-    Keys = [ begin #bitcask_entry{ key = Key } = iterator_next(B), Key end || 
+    {ok, Itr} = iterator(B),
+    Keys = [ begin #bitcask_entry{ key = Key } = iterator_next(Itr), Key end || 
              _ <- default_dataset() ],
     ?assertEqual(lists:sort(Keys), lists:sort([ Key  || {Key, _} <- default_dataset() ])), 
-    iterator_release(B).
+    iterator_release(Itr).
 
 
 fold_corrupt_file_test_() ->
@@ -2132,21 +2124,6 @@ fold_corrupt_file_test2() ->
     ?assertEqual(DataList, bitcask:fold(B4, FoldFun,[])),
     close(B4),
     ok.
-
-% Issue puts until the entries hash in the keydir can not be updated anymore
-% and a pending hash is created. There *has* to be an iterator open when you
-% call this or it will loop for ever and ever. Don't try this at home.
-put_till_frozen(B) ->
-    Key = crypto:rand_bytes(32),
-    bitcask:put(B, Key, <<>>),
-    bitcask:delete(B, Key),
-
-    case bitcask:is_frozen(B) of
-        true ->
-            ok;
-        false ->
-            put_till_frozen(B)
-    end.
 
 finish_worker_loop(Pid) ->
     receive
@@ -2821,7 +2798,7 @@ slow_folder(Cask) ->
                           [{K, V} | Acc]
                   end,
     B = bitcask:open(Cask),
-    L = fold(B, SlowCollect, [], -1, -1, false),
+    L = fold(B, SlowCollect, [], false),
     Owner ! {slow_folder_done, self(), L},
     bitcask:close(B).
 
@@ -2856,7 +2833,7 @@ freeze_close_reopen() ->
                                        {K, V} <- DataList]
                   end,
 
-        ?assertEqual(Data, lists:sort(fold(B, CollectAll, [], -1, -1, false))),
+        ?assertEqual(Data, lists:sort(fold(B, CollectAll, [], false))),
         if true ->
                 State = get_state(B),
                 put_state(B, State#bc_state{max_file_size = 0})
@@ -2916,7 +2893,7 @@ freeze_close_reopen() ->
                      lists:sort(L1a) -- [FirstItemFound]),
 
         %% Check that we see the updated data yet again
-        L3 = fold(B2, CollectAll, [], -1, -1, false),
+        L3 = fold(B2, CollectAll, [], false),
         ?assertEqual(Data2, lists:sort(L3)),
         [{ok, V} = get(B2, K) || {K, V} <- Data2],
         not_found = get(B2, <<DelKey:32>>),

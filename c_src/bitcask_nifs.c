@@ -337,6 +337,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TE
     // Assign the keydir to our handle and hand it back
     handle->keydir = keydir;
     handle->fstats = kh_init(fstats);
+    handle->fstats_mutex = enif_mutex_create(0);
     ERL_NIF_TERM result = enif_make_resource(env, handle);
     enif_release_resource_compat(env, handle);
     return enif_make_tuple2(env, ATOM_OK, result);
@@ -438,6 +439,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
         memset(handle, '\0', sizeof(bitcask_keydir_handle));
         handle->keydir = keydir;
         handle->fstats = kh_init(fstats);
+        handle->fstats_mutex = enif_mutex_create(0);
         ERL_NIF_TERM result = enif_make_resource(env, handle);
         enif_release_resource_compat(env, handle);
 
@@ -737,6 +739,12 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc,
         snapshot_flag = use_snapshot ?
             KEYDIR_ITR_USE_SNAPSHOT : KEYDIR_ITR_NO_SNAPSHOT;
         itr_handle->itr = keydir_itr_create(keydir, snapshot_flag);
+        if (!itr_handle->itr)
+        {
+            enif_release_resource_compat(env, itr_handle);
+            return enif_make_tuple2(env, ATOM_ERROR, ATOM_ALLOCATION_ERROR);
+        }
+
         itr_handle->mutex = enif_mutex_create(0);
 
         itr_ref = enif_make_resource(env, itr_handle);

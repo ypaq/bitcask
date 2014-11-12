@@ -195,12 +195,12 @@ keydir_remove_int(_Ref, _Key, _FileId, _Offset) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_itr(reference(), 0 | 1) ->
-        ok.
+    {ok, reference()} | {error, allocation_error}.
 keydir_itr(_Ref, _UseSnapshot) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_itr(reference()) ->
-        ok.
+    {ok, reference()} | {error, allocation_error}.
 keydir_itr(Ref) ->
     keydir_itr(Ref, 1).
 
@@ -227,17 +227,17 @@ increment_file_id(_Ref, _ConditionalFileId) ->
 -spec keydir_fold(reference(), fun((any(), any()) -> any()), any()) ->
         any() | {error, any()}.
 keydir_fold(Ref, Fun, Acc0) ->
-    FrozenFun = fun() ->
-                        keydir_fold_cont(keydir_itr_next(Ref), Ref, Fun, Acc0)
+    FrozenFun = fun(Itr) ->
+                        keydir_fold_cont(keydir_itr_next(Itr), Itr, Fun, Acc0)
                 end,
     keydir_frozen(Ref, FrozenFun).
 
 %% Execute the function once the keydir is frozen
 keydir_frozen(Ref, FrozenFun) ->
     case keydir_itr(Ref) of
-        Itr when is_reference(Itr) ->
+        {ok, Itr} ->
             try
-                FrozenFun()
+                FrozenFun(Itr)
             after
                 keydir_itr_release(Itr)
             end;
@@ -478,12 +478,12 @@ keydir_itr_while_itr_error_test_() ->
 
 keydir_itr_while_itr_error_test2() ->
     {ok, Ref1} = keydir_new(),
-    ok = keydir_itr(Ref1, -1, -1),
+    {ok, Itr} = keydir_itr(Ref1),
     try
         ?assertEqual({error, iteration_in_process},
-                     keydir_itr(Ref1, -1, -1))
+                     keydir_itr(Itr))
     after
-        keydir_itr_release(Ref1)
+        keydir_itr_release(Itr)
     end.
 
 keydir_double_itr_test_() -> % check iterating flag is cleared
@@ -518,7 +518,7 @@ keydir_del_while_pending_test2() ->
     {ready, Ref2} = keydir_new(Name),
     try
         %% Start keyfold iterator on Ref2
-        ok = keydir_itr(Ref2, -1, -1),
+        {ok, Itr} = keydir_itr(Ref2),
         %% Delete Key
         ?assertEqual(ok, keydir_remove(Ref1, Key)),
         ?assertEqual(not_found, keydir_get(Ref1, Key)),
@@ -527,10 +527,10 @@ keydir_del_while_pending_test2() ->
         Fun = fun(IterKey, Acc) -> [IterKey | Acc] end,
         ?assertEqual([#bitcask_entry{key = Key, file_id = 0, total_sz = 1234,
                                      offset = 0, tstamp = T}],
-                     keydir_fold_cont(keydir_itr_next(Ref2), Ref2, Fun, []))
+                     keydir_fold_cont(keydir_itr_next(Itr), Itr, Fun, []))
     after
         %% End iteration
-        ok = keydir_itr_release(Ref2)
+        ok = keydir_itr_release(Itr)
     end,
     %% Check key is deleted
     ?assertEqual(not_found, keydir_get(Ref1, Key)).
@@ -544,9 +544,9 @@ keydir_create_del_while_pending_test2() ->
     Key = <<"abc">>,
     keydir_mark_ready(Ref1),
     {ready, Ref2} = keydir_new(Name),
+    %% Start keyfold iterator on Ref2
+    {ok, Itr} = keydir_itr(Ref2),
     try
-        %% Start keyfold iterator on Ref2
-        ok = keydir_itr(Ref2, -1, -1),
         %% Delete Key
         ok = keydir_put(Ref1, Key, 0, 1234, 0, 1),
         ?assertEqual(#bitcask_entry{key = Key, file_id = 0, total_sz = 1234,
@@ -558,10 +558,10 @@ keydir_create_del_while_pending_test2() ->
 
         %% Keep iterating on Ref2 and check result is [] it was started after iter
         Fun = fun(IterKey, Acc) -> [IterKey | Acc] end,
-        ?assertEqual([], keydir_fold_cont(keydir_itr_next(Ref2), Ref2, Fun, []))
+        ?assertEqual([], keydir_fold_cont(keydir_itr_next(Itr), Itr, Fun, []))
     after
         %% End iteration
-        ok = keydir_itr_release(Ref2)
+        ok = keydir_itr_release(Itr)
     end,
     %% Check key is deleted
     ?assertEqual(not_found, keydir_get(Ref1, Key)),
@@ -579,9 +579,9 @@ keydir_del_put_while_pending_test2() ->
     keydir_mark_ready(Ref1),
     {ready, Ref2} = keydir_new(Name),
     T = bitcask_time:tstamp(),
+    %% Start keyfold iterator on Ref2
+    {ok, Itr} = keydir_itr(Ref2),
     try
-        %% Start keyfold iterator on Ref2
-        ok = keydir_itr(Ref2, -1, -1),
         %% Delete Key
         ?assertEqual(ok, keydir_remove(Ref1, Key)),
         ok = keydir_put(Ref1, Key, 0, 1234, 0, T+2),
@@ -591,10 +591,10 @@ keydir_del_put_while_pending_test2() ->
 
         %% Keep iterating on Ref2 and check result is [] it was started after iter
         Fun = fun(IterKey, Acc) -> [IterKey | Acc] end,
-        ?assertEqual([], keydir_fold_cont(keydir_itr_next(Ref2), Ref2, Fun, []))
+        ?assertEqual([], keydir_fold_cont(keydir_itr_next(Itr), Itr, Fun, []))
     after
         %% End iteration
-        ok = keydir_itr_release(Ref2)
+        ok = keydir_itr_release(Itr)
     end,
     %% Check key is still present
     ?assertEqual(#bitcask_entry{key = Key, file_id = 0, total_sz = 1234,
@@ -608,11 +608,11 @@ keydir_multi_put_during_itr_test2() ->
     {not_ready, Ref} = bitcask_nifs:keydir_new("t"),
     bitcask_nifs:keydir_mark_ready(Ref),
     bitcask_nifs:keydir_put(Ref, <<"k">>, 123, 1, 0, 1),
-    bitcask_nifs:keydir_itr(Ref, 0, 0),
+    {ok, Itr} = bitcask_nifs:keydir_itr(Ref),
     bitcask_nifs:keydir_put(Ref, <<"k">>, 123, 2, 10, 2),
     bitcask_nifs:keydir_put(Ref, <<"k">>, 123, 3, 20, 3),
     bitcask_nifs:keydir_put(Ref, <<"k">>, 123, 4, 30, 4),
-    bitcask_nifs:keydir_itr_release(Ref).
+    bitcask_nifs:keydir_itr_release(Itr).
 
 keydir_itr_out_of_date_test_() ->
     {timeout, 60, fun keydir_itr_out_of_date_test2/0}.
@@ -771,14 +771,14 @@ yoo(NumKeys, NumChange, NumDelete) ->
         [ok = keydir_put(Ref, <<X:32>>, 0, 0, X, 0) ||
             X <- lists:seq(1, NumKeys)],
         T1 = os:timestamp(),
-        ok = keydir_itr(Ref, -1, -1),
+        {ok, Itr} = keydir_itr(Ref),
         T2 = os:timestamp(),
         [ok = keydir_put(Ref, <<X:32>>, 1, 0, X, 0) ||
             X <- lists:seq(1, NumChange)],
         [ok = keydir_remove(Ref, <<X:32>>) ||
             X <- lists:seq(NumKeys - NumDelete, NumKeys)],
         T3 = os:timestamp(),
-        ok = keydir_itr_release(Ref),
+        ok = keydir_itr_release(Itr),
 
         %% This method's use of list comprehension + lists:seq(1,LargeNum)
         %% generates enough garbage to cause tail latency outliers

@@ -1627,7 +1627,10 @@ keydir_itr_t * keydir_itr_create(bitcask_keydir * keydir,
                                  KeydirItrSnapshotFlag snapshot_flag)
 {
     keydir_itr_t * itr = malloc(sizeof(keydir_itr_t));
-    keydir_itr_init(keydir, snapshot_flag, itr);
+    if (itr)
+    {
+        keydir_itr_init(keydir, snapshot_flag, itr);
+    }
     return itr;
 }
 
