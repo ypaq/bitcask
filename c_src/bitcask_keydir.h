@@ -52,10 +52,10 @@ int is_tombstone_entry(keydir_entry_t * entry);
 typedef struct
 {
     uint32_t file_id;
-    uint64_t live_keys;   // number of 'live' keys in entries and pending
-    uint64_t live_bytes;  // number of bytes used by 'live' keys
-    uint64_t total_keys;  // total number of keys written to file
-    uint64_t total_bytes; // total number of bytes written to file
+    int64_t live_keys;   // number of 'live' keys in entries and pending
+    int64_t live_bytes;  // number of bytes used by 'live' keys
+    int64_t total_keys;  // total number of keys written to file
+    int64_t total_bytes; // total number of bytes written to file
     uint32_t oldest_tstamp; // oldest observed tstamp in a file
     uint32_t newest_tstamp; // newest observed tstamp in a file
 } bitcask_fstats_entry;
@@ -137,6 +137,8 @@ typedef struct
     // on demand so they can be concurrently updated.
     unsigned          num_fstats;
     fstats_handle_t * fstats_array;
+    // Re-used by fstats aggregation
+    fstats_hash_t *   tmp_fstats;
 
     // Function that returns the index of the partial file stats object to use
     // Either random or mapping to a fixed number of logical threads to avoid
@@ -171,11 +173,13 @@ typedef struct
 } keydir_init_params_t;
 
 void keydir_default_init_params(keydir_init_params_t * params);
+
 int keydir_common_init(bitcask_keydir * keydir, keydir_init_params_t * params);
 
 void free_keydir(bitcask_keydir* keydir);
 
 void keydir_add_file(bitcask_keydir * keydir, uint32_t file_id);
+
 void keydir_remove_file(bitcask_keydir * keydir, uint32_t file_id);
 
 void update_fstats(fstats_hash_t * fstats,
@@ -186,6 +190,8 @@ void update_fstats(fstats_hash_t * fstats,
                    int32_t total_increment,
                    int32_t live_bytes_increment,
                    int32_t total_bytes_increment);
+
+void keydir_aggregate_fstats(bitcask_keydir * keydir);
 
 void free_fstats(fstats_hash_t * fstats);
 

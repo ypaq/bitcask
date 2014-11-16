@@ -32,7 +32,7 @@
  #include <atomic.h>
 #endif
 
-static uint64_t bc_atomic_incr_64(volatile uint64_t * ptr)
+static inline uint64_t bc_atomic_incr_64(volatile uint64_t * ptr)
 {
 #if BITCASK_IS_SOLARIS
     return atomic_inc_64_nv(ptr);
@@ -41,7 +41,7 @@ static uint64_t bc_atomic_incr_64(volatile uint64_t * ptr)
 #endif
 }
 
-static uint32_t bc_atomic_incr_32(volatile uint32_t * ptr)
+static inline uint32_t bc_atomic_incr_32(volatile uint32_t * ptr)
 {
 #if BITCASK_IS_SOLARIS
     return atomic_inc_32_nv(ptr);
@@ -50,7 +50,7 @@ static uint32_t bc_atomic_incr_32(volatile uint32_t * ptr)
 #endif
 }
 
-static uint64_t bc_atomic_add_64(volatile uint64_t * ptr, int64_t val)
+static inline uint64_t bc_atomic_add_64(volatile uint64_t * ptr, int64_t val)
 {
 #if BITCASK_IS_SOLARIS
     return atomic_add_64_nv(ptr, val);
@@ -59,7 +59,7 @@ static uint64_t bc_atomic_add_64(volatile uint64_t * ptr, int64_t val)
 #endif
 }
 
-static uint32_t bc_atomic_add_32(volatile uint32_t * ptr, int32_t val)
+static inline uint32_t bc_atomic_add_32(volatile uint32_t * ptr, int32_t val)
 {
 #if BITCASK_IS_SOLARIS
     return atomic_add_32_nv(ptr, val);
@@ -68,7 +68,7 @@ static uint32_t bc_atomic_add_32(volatile uint32_t * ptr, int32_t val)
 #endif
 }
 
-static int bc_atomic_cas_32(volatile uint32_t * ptr,
+static inline int bc_atomic_cas_32(volatile uint32_t * ptr,
                           uint32_t comp_val,
                           uint32_t exchange_val)
 {
@@ -79,7 +79,7 @@ static int bc_atomic_cas_32(volatile uint32_t * ptr,
 #endif
 }
 
-static int bc_atomic_cas_64(volatile uint64_t * ptr,
+static inline int bc_atomic_cas_64(volatile uint64_t * ptr,
                           uint64_t comp_val,
                           uint64_t exchange_val)
 {
@@ -90,7 +90,7 @@ static int bc_atomic_cas_64(volatile uint64_t * ptr,
 #endif
 }
 
-static int bc_atomic_cas_ptr(volatile void ** ptr,
+static inline int bc_atomic_cas_ptr(volatile void ** ptr,
                            void* comp_val,
                            void* exchange_val)
 {
@@ -101,7 +101,7 @@ static int bc_atomic_cas_ptr(volatile void ** ptr,
 #endif
 }
 
-static void bc_full_barrier()
+static inline void bc_full_barrier()
 {
     __sync_synchronize();
 }

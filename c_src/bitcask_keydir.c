@@ -70,6 +70,12 @@ static void free_swap_array(swap_array_t * swap_array)
     }
 }
 
+static void free_fstats_handle(fstats_handle_t * handle)
+{
+    free_fstats(handle->fstats);
+    enif_mutex_destroy(handle->mutex);
+}
+
 void free_fstats(fstats_hash_t * fstats)
 {
     kh_destroy(fstats, fstats);
@@ -96,6 +102,7 @@ static void keydir_free_memory(bitcask_keydir * keydir)
     free(keydir->mem_pages);
     free(keydir->buffer);
     free_swap_array(keydir->swap_pages);
+    free(keydir->tmp_fstats);
 
     if (keydir->mutex)
     {
@@ -110,6 +117,11 @@ static void keydir_free_memory(bitcask_keydir * keydir)
     }
 
     free_fstats(keydir->fstats);
+    for (idx = 0; idx < keydir->num_fstats; ++idx)
+    {
+        free_fstats_handle(keydir->fstats_array + idx);
+    }
+
     keydir->fstats = NULL;
     keydir->swap_pages = NULL;
     keydir->mem_pages = NULL;
@@ -227,6 +239,7 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->buffer = NULL;
     keydir->mem_pages = NULL;
     keydir->swap_pages = NULL;
+    keydir->tmp_fstats = NULL;
 
     keydir->itr_array.items = NULL;
     keydir->itr_array.count = 0;
@@ -245,9 +258,10 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->buffer = malloc(PAGE_SIZE * params->num_pages);
     keydir->mem_pages = malloc(sizeof(mem_page_t) * params->num_pages);
     keydir->swap_pages = malloc(sizeof(swap_array_t));
+    keydir->tmp_fstats = kh_init(fstats);
     
     if (!keydir->mutex || !keydir->swap_grow_mutex || !keydir->buffer
-        || !keydir->mem_pages || !keydir->swap_pages)
+        || !keydir->mem_pages || !keydir->swap_pages || !keydir->tmp_fstats)
     {
         keydir_free_memory(keydir);
         return ENOMEM;
@@ -335,6 +349,27 @@ void keydir_remove_file(bitcask_keydir * keydir, uint32_t file_id)
     enif_mutex_unlock(keydir->mutex);
 }
 
+static uint32_t oldest_timestamp(uint32_t oldest, uint32_t tstamp)
+{
+    if ((tstamp && tstamp < oldest) || !oldest)
+    {
+        return tstamp;
+    }
+
+    return oldest;
+}
+
+
+static uint32_t newest_timestamp(uint32_t newest, uint32_t tstamp)
+{
+    if ((tstamp && tstamp > newest) || !newest)
+    {
+        return tstamp;
+    }
+
+    return newest;
+}
+
 void update_fstats(fstats_hash_t * fstats,
                    ErlNifMutex * mutex,
                    uint32_t file_id,
@@ -369,21 +404,69 @@ void update_fstats(fstats_hash_t * fstats,
     entry->total_keys  += total_increment;
     entry->live_bytes  += live_bytes_increment;
     entry->total_bytes += total_bytes_increment;
-
-    if ((tstamp && tstamp < entry->oldest_tstamp) || !entry->oldest_tstamp)
-    {
-        entry->oldest_tstamp = tstamp;
-    }
-
-    if ((tstamp && tstamp > entry->newest_tstamp) || !entry->newest_tstamp)
-    {
-        entry->newest_tstamp = tstamp;
-    }
+    entry->oldest_tstamp = oldest_timestamp(entry->oldest_tstamp, tstamp);
+    entry->newest_tstamp = newest_timestamp(entry->newest_tstamp, tstamp);
 
     if (mutex)
     {
         enif_mutex_unlock(mutex);
     }
+}
+
+static void merge_fstats_entry(bitcask_fstats_entry * partial,
+                               bitcask_fstats_entry * total)
+{
+    total->live_keys += partial->live_keys;
+    total->live_bytes += partial->live_bytes;
+    total->total_keys += partial->total_keys;
+    total->total_bytes += partial->total_bytes;
+    total->oldest_tstamp = oldest_timestamp(total->oldest_tstamp,
+                                            partial->oldest_tstamp);
+    total->newest_tstamp = newest_timestamp(total->newest_tstamp,
+                                            partial->newest_tstamp);
+}
+
+void keydir_aggregate_fstats(bitcask_keydir * keydir)
+{
+    unsigned idx;
+    fstats_hash_t * fstats, * kd_fstats;
+    // Lock in this order to avoid deadlock: keydir -> fstats handle
+    enif_mutex_lock(keydir->mutex);
+    kd_fstats = keydir->fstats;
+
+    for (idx = 0; idx < keydir->num_fstats; ++idx)
+    {
+        fstats_handle_t * h = keydir->fstats_array + idx;
+        khiter_t pitr;
+
+        // Quickly swap partial stats with empty temporary to avoid blocking
+        // gets and puts.
+        enif_mutex_lock(h->mutex);
+        fstats = h->fstats;
+        h->fstats = keydir->tmp_fstats;
+        enif_mutex_unlock(h->mutex);
+
+        keydir->tmp_fstats = fstats;
+        
+        for (pitr = kh_begin(fstats); pitr != kh_end(fstats); ++pitr)
+        {
+            if (kh_exist(fstats, pitr))
+            {
+                bitcask_fstats_entry * pentry = &kh_val(fstats, pitr);
+                khiter_t gitr = kh_get(fstats, kd_fstats, pentry->file_id);
+
+                if (gitr != kh_end(kd_fstats))
+                {
+                    bitcask_fstats_entry * gentry = &kh_val(fstats, gitr);
+                    merge_fstats_entry(pentry, gentry);
+                }
+
+                kh_del(fstats, fstats, pitr);
+            }
+        }
+    }
+
+    enif_mutex_unlock(keydir->mutex);
 }
 
 static int hash_key(uint8_t * key, uint32_t key_sz)
@@ -1594,7 +1677,8 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
 /*
  * Adds a memory page to the front of the free list.
  */
-static void add_free_page(bitcask_keydir * keydir, uint32_t page_idx)
+// static when used
+void add_free_page(bitcask_keydir * keydir, uint32_t page_idx)
 {
     mem_page_t * mem_page;
     uint32_t first_free_idx;

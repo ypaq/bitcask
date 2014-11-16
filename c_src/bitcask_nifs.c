@@ -189,7 +189,6 @@ static ERL_NIF_TERM ATOM_MODIFIED;
 static ERL_NIF_TERM ATOM_NOT_FOUND;
 static ERL_NIF_TERM ATOM_NOT_READY;
 static ERL_NIF_TERM ATOM_OK;
-static ERL_NIF_TERM ATOM_OUT_OF_DATE;
 static ERL_NIF_TERM ATOM_OUT_OF_MEMORY;
 static ERL_NIF_TERM ATOM_PREAD_ERROR;
 static ERL_NIF_TERM ATOM_PWRITE_ERROR;
@@ -829,14 +828,15 @@ ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc, const ERL_NIF_TE
         {
             return enif_make_badarg(env);
         }
-        LOCK(keydir);
 
-        // TODO: Add fstats aggreation for all Bitcask handles here
+        // Fold partial fstats into keydir fstats
+        keydir_aggregate_fstats(keydir);
 
         // Dump fstats info into a list of [{file_id, live_keys, total_keys,
         //                                   live_bytes, total_bytes,
         //                                   oldest_tstamp, newest_tstamp,
         //                                   expiration_epoch}]
+        LOCK(keydir);
         ERL_NIF_TERM fstats_list = enif_make_list(env, 0);
         khiter_t itr;
         bitcask_fstats_entry* curr_f;
@@ -1533,12 +1533,6 @@ static void bitcask_nifs_iterator_resource_cleanup(ErlNifEnv* env, void* arg)
     enif_mutex_destroy(handle->mutex);
 }
 
-static void free_fstats_handle(fstats_handle_t * handle)
-{
-    free_fstats(handle->fstats);
-    enif_mutex_destroy(handle->mutex);
-}
-
 static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
 {
     bitcask_keydir_handle* handle = (bitcask_keydir_handle*)arg;
@@ -1684,7 +1678,6 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_NOT_FOUND = enif_make_atom(env, "not_found");
     ATOM_NOT_READY = enif_make_atom(env, "not_ready");
     ATOM_OK = enif_make_atom(env, "ok");
-    ATOM_OUT_OF_DATE = enif_make_atom(env, "out_of_date");
     ATOM_OUT_OF_MEMORY = enif_make_atom(env, "out_of_memory");
     ATOM_PREAD_ERROR = enif_make_atom(env, "pread_error");
     ATOM_PWRITE_ERROR = enif_make_atom(env, "pwrite_error");
