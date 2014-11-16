@@ -72,21 +72,6 @@ static void free_swap_array(swap_array_t * swap_array)
 
 void free_fstats(fstats_hash_t * fstats)
 {
-    if (fstats)
-    {
-        bitcask_fstats_entry* curr_f;
-        khiter_t itr;
-
-        for (itr = kh_begin(fstats); itr != kh_end(fstats); ++itr)
-        {
-            if (kh_exist(fstats, itr))
-            {
-                curr_f = kh_val(fstats, itr);
-                free(curr_f);
-            }
-        }
-    }
-
     kh_destroy(fstats, fstats);
 }
 
@@ -187,20 +172,54 @@ void keydir_init_mem_pages(bitcask_keydir * keydir)
     }
 }
 
-#define KEYDIR_INIT_PATH_BUFFER_LENGTH 1024
+static int open_swap_file(const char * basedir)
+{
+    int swap_fd;
+    // The joy that is manipulating strings in C
+    const char * extra_path = "/bitcask.swap";
+    const int extra_length = strlen(extra_path);
+    const int basedir_length = strlen(basedir);
+    char * swap_path = malloc(basedir_length + extra_length + 1);
+
+    if (swap_path)
+    {
+        strcpy(swap_path, basedir);
+        memcpy(swap_path + basedir_length, extra_path, extra_length + 1);
+        swap_fd = open(swap_path, O_CREAT|O_TRUNC|O_RDWR, 0600);
+        free(swap_path);
+    }
+    else
+    {
+        swap_fd = -1;
+    }
+
+    return swap_fd;
+}
+
+static unsigned default_fstats_idx_fun()
+{
+    return rand();
+}
+
+#define KEYDIR_DEFAULT_NUM_PAGES 1024
+#define KEYDIR_DEFAULT_NUM_INITIAL_SWAP_PAGES 1024
+
+void keydir_default_init_params(keydir_init_params_t * params)
+{
+    params->basedir = ".";
+    params->num_pages = KEYDIR_DEFAULT_NUM_PAGES;
+    params->initial_num_swap_pages = KEYDIR_DEFAULT_NUM_INITIAL_SWAP_PAGES;
+    params->fstats_idx_fun = default_fstats_idx_fun;
+}
 
 /*
  * Returns an errno code or zero if successful. 
  */
 int keydir_common_init(bitcask_keydir * keydir,
-                       const char * basedir,
-                       uint32_t num_pages,
-                       uint32_t initial_num_swap_pages)
+                       keydir_init_params_t *params)
 
 {
-    char swap_path[KEYDIR_INIT_PATH_BUFFER_LENGTH];
     int ret_code;
-    off_t swap_file_size;
 
     // Avoid unitialized pointers in case we call keydir_free_memory()
     keydir->mutex = NULL;
@@ -209,36 +228,35 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->mem_pages = NULL;
     keydir->swap_pages = NULL;
 
-
     keydir->itr_array.items = NULL;
     keydir->itr_array.count = 0;
     keydir->itr_array.size = 0;
 
     keydir->refcount = 1;
-    keydir->num_pages = num_pages;
-    keydir->num_swap_pages = initial_num_swap_pages;
+    keydir->num_pages = params->num_pages;
+    keydir->num_swap_pages = params->initial_num_swap_pages;
     keydir->epoch = 0;
     keydir->min_epoch = MAX_EPOCH;
+    keydir->fstats_idx_fun = params->fstats_idx_fun;
 
     keydir->mutex = enif_mutex_create(keydir->name);
     keydir->swap_grow_mutex = enif_mutex_create(0);
-    keydir->buffer = malloc(PAGE_SIZE * num_pages);
-    keydir->mem_pages = malloc(sizeof(mem_page_t) * num_pages);
+
+    keydir->buffer = malloc(PAGE_SIZE * params->num_pages);
+    keydir->mem_pages = malloc(sizeof(mem_page_t) * params->num_pages);
     keydir->swap_pages = malloc(sizeof(swap_array_t));
     
-    if (!keydir->mutex
-        || !keydir->swap_grow_mutex
-        || !keydir->buffer
-        || !keydir->mem_pages
-        || !keydir->swap_pages)
+    if (!keydir->mutex || !keydir->swap_grow_mutex || !keydir->buffer
+        || !keydir->mem_pages || !keydir->swap_pages)
     {
         keydir_free_memory(keydir);
         return ENOMEM;
     }
 
     keydir->swap_pages->next = NULL;
-    keydir->swap_pages->size = initial_num_swap_pages;
-    keydir->swap_pages->pages = malloc(sizeof(page_t)* initial_num_swap_pages);
+    keydir->swap_pages->size = params->initial_num_swap_pages;
+    keydir->swap_pages->pages = malloc(sizeof(page_t) *
+                                       params->initial_num_swap_pages);
 
     if (!keydir->swap_pages->pages)
     {
@@ -249,24 +267,11 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir_init_mem_pages(keydir);
     keydir_init_free_list(keydir);
 
-    // create swap file.
-    const char * extra_path = "/bitcask.swap";
-    const int extra_length = strlen(extra_path);
-
-    if (strlen(basedir) + extra_length + 1 > KEYDIR_INIT_PATH_BUFFER_LENGTH)
+    if ((keydir->swap_file_desc = open_swap_file(params->basedir)) < 0)
     {
+        ret_code = errno;
         keydir_free_memory(keydir);
-        return ENAMETOOLONG;
-    }
-
-    strcpy(swap_path, basedir);
-    strcat(swap_path, "/bitcask.swap");
-    keydir->swap_file_desc = open(swap_path, O_CREAT|O_TRUNC|O_RDWR, 0600);
-
-    if (keydir->swap_file_desc < 0)
-    {
-        keydir_free_memory(keydir);
-        return errno;
+        return ret_code;
     }
     
 #ifdef DO_THAT_SHIT_LATER
@@ -280,7 +285,7 @@ int keydir_common_init(bitcask_keydir * keydir,
     }
 #endif
     
-    swap_file_size = initial_num_swap_pages * PAGE_SIZE;
+    off_t swap_file_size = params->initial_num_swap_pages * PAGE_SIZE;
 
     if (ftruncate(keydir->swap_file_desc, swap_file_size))
     {
@@ -290,20 +295,54 @@ int keydir_common_init(bitcask_keydir * keydir,
     }
 
     keydir->fstats = kh_init(fstats);
-
     return 0; // Sweet success!!
+}
+
+static void init_fstats_entry(bitcask_fstats_entry * entry, int file_id)
+{
+    memset(entry, '\0', sizeof(bitcask_fstats_entry));
+    entry->file_id = file_id;
+}
+
+void keydir_add_file(bitcask_keydir * keydir, uint32_t file_id)
+{
+    khiter_t itr;
+
+    enif_mutex_lock(keydir->mutex);
+    itr = kh_get(fstats, keydir->fstats, file_id);
+
+    if (itr == kh_end(keydir->fstats))
+    {
+        int itr_status;
+        khiter_t itr = kh_put(fstats, keydir->fstats, file_id, &itr_status);
+        init_fstats_entry(&kh_val(keydir->fstats, itr), file_id);
+    }
+
+    enif_mutex_unlock(keydir->mutex);
+}
+
+void keydir_remove_file(bitcask_keydir * keydir, uint32_t file_id)
+{
+    khiter_t itr;
+    enif_mutex_lock(keydir->mutex);
+    itr = kh_get(fstats, keydir->fstats, file_id);
+
+    if (itr != kh_end(keydir->fstats))
+    {
+        kh_del(fstats, keydir->fstats, itr);
+    }
+
+    enif_mutex_unlock(keydir->mutex);
 }
 
 void update_fstats(fstats_hash_t * fstats,
                    ErlNifMutex * mutex,
                    uint32_t file_id,
                    uint32_t tstamp,
-                   uint64_t expiration_epoch,
                    int32_t live_increment,
                    int32_t total_increment,
                    int32_t live_bytes_increment,
-                   int32_t total_bytes_increment,
-                   int32_t should_create)
+                   int32_t total_bytes_increment)
 {
     bitcask_fstats_entry* entry = 0;
 
@@ -316,26 +355,14 @@ void update_fstats(fstats_hash_t * fstats,
 
     if (itr == kh_end(fstats))
     {
-        if (!should_create)
-        {
-            if (mutex)
-            {
-                enif_mutex_unlock(mutex);
-            }
-            return;
-        }
-
-        // Need to initialize new entry and add to the table
-        entry = malloc(sizeof(bitcask_fstats_entry));
-        memset(entry, '\0', sizeof(bitcask_fstats_entry));
-        entry->expiration_epoch = MAX_EPOCH;
-        entry->file_id = file_id;
-
-        kh_put2(fstats, fstats, file_id, entry);
+        int itr_status;
+        itr = kh_put(fstats, fstats, file_id, &itr_status);
+        entry = &kh_val(fstats, itr);
+        init_fstats_entry(entry, file_id);
     }
     else
     {
-        entry = kh_val(fstats, itr);
+        entry = &kh_val(fstats, itr);
     }
 
     entry->live_keys   += live_increment;
@@ -343,19 +370,12 @@ void update_fstats(fstats_hash_t * fstats,
     entry->live_bytes  += live_bytes_increment;
     entry->total_bytes += total_bytes_increment;
 
-    if (expiration_epoch < entry->expiration_epoch)
-    {
-        entry->expiration_epoch = expiration_epoch;
-    }
-
-    if ((tstamp != 0 && tstamp < entry->oldest_tstamp) ||
-        entry->oldest_tstamp == 0)
+    if ((tstamp && tstamp < entry->oldest_tstamp) || !entry->oldest_tstamp)
     {
         entry->oldest_tstamp = tstamp;
     }
 
-    if ((tstamp != 0 && tstamp > entry->newest_tstamp) ||
-        entry->newest_tstamp == 0)
+    if ((tstamp && tstamp > entry->newest_tstamp) || !entry->newest_tstamp)
     {
         entry->newest_tstamp = tstamp;
     }
@@ -557,6 +577,16 @@ static void scan_get_key(scan_iter_t * iter, uint8_t * key)
         memcpy(dst, src, section_size);
         remainder -= section_size;
     }
+}
+
+static int scan_is_tombstone(scan_iter_t * iter)
+{
+    return scan_get_offset(iter) == MAX_OFFSET;
+}
+
+static void scan_make_tombstone(scan_iter_t * iter)
+{
+    scan_set_offset(iter, MAX_OFFSET);
 }
 
 /*
@@ -822,7 +852,7 @@ static int extend_iter_chain(bitcask_keydir * keydir,
         // Reached last page in chain.
         if (next == MAX_PAGE_IDX)
         {
-            break;
+            return 0;
         }
 
         // if memory page
@@ -1115,7 +1145,11 @@ static void scan_iter_to_entry(scan_iter_t * iter,
     return_entry->epoch         = scan_get_epoch(iter);
     return_entry->offset        = scan_get_offset(iter);
     return_entry->timestamp     = scan_get_timestamp(iter);
-    return_entry->is_tombstone  = return_entry->offset == MAX_OFFSET;
+}
+
+int is_tombstone_entry(keydir_entry_t * entry)
+{
+    return entry->offset == MAX_OFFSET;
 }
 
 static void unlock_pages(int num_pages, page_info_t * pages)
@@ -1353,47 +1387,60 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
                          uint64_t         old_offset)
 {
     scan_iter_t iter;
-    uint64_t chain_size;
+    uint32_t found_file_id, found_size = 0;
+    int added = 0;
     KeydirPutCode ret_code = KEYDIR_PUT_OK;
+    unsigned fstats_index = keydir->fstats_idx_fun() % keydir->num_fstats;
+    fstats_handle_t * fstats_handle = keydir->fstats_array + fstats_index;
 
     while (1)
     {
-        entry->epoch = bc_atomic_incr64(&keydir->epoch);
+        entry->epoch = bc_atomic_incr_64(&keydir->epoch);
         scan_for_key(keydir, entry->key, entry->key_size, entry->epoch, &iter);
 
         if (iter.found)
         {
-            // If CAS, but entry has changed.
-            // TODO: Original code had a shady comment (by yours truly) about the
-            // conditional logic and merges finding two current values for the
-            // same because they were in the same second. I think it's not needed,
-            // but need to verify carefully.
+            int is_tombstone = scan_is_tombstone(&iter);
+            uint64_t file_offset = scan_get_offset(&iter);
+
+            found_size = is_tombstone ? 0 : scan_get_total_size(&iter);
+            found_file_id = scan_get_file_id(&iter);
+
+            // If CAS, but entry deleted or changed.
+            // TODO: Original code had a shady comment (by yours truly) about
+            // the conditional logic and merges finding two current values for
+            // the same because they were in the same second. I think it's not
+            // needed, but need to verify carefully.
             if (old_file_id &&
-                (scan_get_file_id(&iter) != old_file_id ||
-                 scan_get_offset(&iter) != old_offset))
+                (is_tombstone ||
+                 found_file_id != old_file_id || file_offset != old_offset))
             {
                 ret_code = KEYDIR_PUT_MODIFIED;
             }
+            // if we can update entry in place
             else if (keydir->min_epoch > entry->epoch)
             {
+                added = 1;
                 update_entry(&iter, entry);
             }
-            else // Adding extra version for this key.
+            else // Adding extra version
             {
-                // Expand to fit extra version, no extra copy of key needed.
-                switch(write_prep(keydir, &iter, 0))
+                uint64_t chain_size;
+                // Expand to fit extra version
+                switch(write_prep(keydir, &iter, 0/* no key */))
                 {
                     case WRITE_PREP_NO_MEM:
                         ret_code = KEYDIR_PUT_OUT_OF_MEMORY;
                         break;
                     case WRITE_PREP_RESTART:
-                        continue;
+                        continue; // Concurrency conflict, retry.
                     case WRITE_PREP_OK:
                         // Point previous version to new one.
                         chain_size = iter.pages[0].mem_page->size;
                         iter.offset = chain_size;
                         scan_set_next(&iter, chain_size);
                         append_version(&iter, entry);
+                        added = 1;
                         break;
                 }
             }
@@ -1414,6 +1461,7 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
                 case WRITE_PREP_OK:
                     entry->next = 0;
                     append_entry(&iter, entry);
+                    added = 1;
                     break;
             }
         }
@@ -1421,6 +1469,28 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
     }
 
     free_scan_iter(&iter);
+
+    if (added)
+    {
+        // Update file key/bytes stats
+        enif_mutex_lock(fstats_handle->mutex);
+
+        if (found_size)
+        {
+            update_fstats(fstats_handle->fstats, NULL /* don't lock */,
+                          found_file_id, 0, -1, 0, -found_size, 0); 
+        }
+
+        update_fstats(fstats_handle->fstats, NULL /* don't lock */,
+                      entry->file_id, entry->timestamp,
+                      1, 1, (int32_t)entry->total_size,
+                      (int32_t)entry->total_size ); 
+        enif_mutex_unlock(fstats_handle->mutex);
+
+        bc_atomic_add_64(&keydir->key_bytes,
+                         (int32_t)entry->total_size - found_size);
+    }
+
     return ret_code;
 }
 
@@ -1445,30 +1515,36 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
     scan_iter_t iter;
     uint64_t epoch;
     KeydirPutCode ret_code = KEYDIR_PUT_OK;
-    uint32_t chain_size;
+    unsigned fstats_index = keydir->fstats_idx_fun() % keydir->num_fstats;
+    fstats_handle_t * fstats_handle = keydir->fstats_array + fstats_index;
+    uint32_t found_file_id = 0, found_size = 0;
 
     while (1)
     {
-        epoch = bc_atomic_incr64(&keydir->epoch);
+        epoch = bc_atomic_incr_64(&keydir->epoch);
         scan_for_key(keydir, key, key_size, epoch, &iter);
 
-        if (iter.found)
+        if (iter.found & !scan_is_tombstone(&iter))
         {
+            found_file_id = scan_get_file_id(&iter);
+            uint64_t file_offset = scan_get_offset(&iter);
             // If conditional remove, verify entry has not changed
             if (old_file_id &&
-                (scan_get_file_id(&iter) != old_file_id ||
-                 scan_get_offset(&iter) != old_offset))
+                (found_file_id != old_file_id || file_offset != old_offset))
             {
                 ret_code = KEYDIR_PUT_MODIFIED;
             }
             else if (keydir->min_epoch > epoch)
             {
+                found_size = scan_get_total_size(&iter);
                 // safe to update in place, no snapshots will need this entry.
-                scan_set_offset(&iter, MAX_OFFSET);
+                scan_make_tombstone(&iter);
                 scan_set_epoch(&iter, epoch);
+
             }
             else // Adding extra version for this key.
             {
+                uint32_t chain_size;
                 // Expand to fit extra version, no extra copy of key needed.
                 switch(write_prep(keydir, &iter, 0))
                 {
@@ -1482,6 +1558,10 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
                         chain_size = iter.pages[0].mem_page->size;
                         scan_set_next(&iter, chain_size);
                         iter.offset = chain_size;
+                        found_size = scan_get_total_size(&iter);
+                        update_fstats(fstats_handle->fstats,
+                                      fstats_handle->mutex,
+                                      found_file_id, 0, -1, 0, -found_size, 0);
                         append_deleted_version(&iter, epoch);
                         break;
                     default:
@@ -1498,6 +1578,16 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
     }
 
     free_scan_iter(&iter);
+
+    // Update file stats
+    if (found_size)
+    {
+        update_fstats(fstats_handle->fstats, fstats_handle->mutex,
+                      found_file_id, 0, -1, 0, -found_size, 0);
+        bc_atomic_add_64(&keydir->key_count, -1);
+        bc_atomic_add_64(&keydir->key_bytes, (int64_t)found_size);
+    }
+
     return ret_code;
 }
 
@@ -1608,7 +1698,7 @@ void keydir_itr_init(bitcask_keydir * keydir,
     }
     else
     {
-        itr->epoch = bc_atomic_incr64(&keydir->epoch);
+        itr->epoch = bc_atomic_incr_64(&keydir->epoch);
     }
 
     // Ensure space for another iterator

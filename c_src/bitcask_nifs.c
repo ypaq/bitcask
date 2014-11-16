@@ -43,6 +43,9 @@
 
 //typesystem hack to avoid some incorrect errors.
 typedef ErlNifUInt64 uint64;
+// We naughtily peek at the current scheduler id to use per scheduler
+// stats object to maximize concurrency.
+unsigned erts_get_scheduler_id();
 
 #ifdef BITCASK_DEBUG
 #include <stdarg.h>
@@ -133,9 +136,7 @@ void format_bin(char * buf, size_t buf_size, const unsigned char * bin, size_t b
 
 static ErlNifResourceType* bitcask_keydir_RESOURCE;
 static ErlNifResourceType* bitcask_iterator_RESOURCE;
-
 static ErlNifResourceType* bitcask_lock_RESOURCE;
-
 static ErlNifResourceType* bitcask_file_RESOURCE;
 
 typedef struct
@@ -146,15 +147,7 @@ typedef struct
 typedef struct
 {
     bitcask_keydir* keydir;
-    fstats_hash_t*  fstats;
-    ErlNifMutex *   fstats_mutex;
 } bitcask_keydir_handle;
-
-typedef struct
-{
-    keydir_itr_t * itr;
-    ErlNifMutex *  mutex;
-} bitcask_iterator_handle;
 
 typedef struct
 {
@@ -191,11 +184,6 @@ static ERL_NIF_TERM ATOM_ERROR;
 static ERL_NIF_TERM ATOM_FALSE;
 static ERL_NIF_TERM ATOM_FSTAT_ERROR;
 static ERL_NIF_TERM ATOM_FTRUNCATE_ERROR;
-static ERL_NIF_TERM ATOM_GETFL_ERROR;
-static ERL_NIF_TERM ATOM_ILT_CREATE_ERROR; /* Iteration lock thread creation error */
-static ERL_NIF_TERM ATOM_ITERATION_IN_PROCESS;
-static ERL_NIF_TERM ATOM_ITERATION_NOT_PERMITTED;
-static ERL_NIF_TERM ATOM_ITERATION_NOT_STARTED;
 static ERL_NIF_TERM ATOM_LOCK_NOT_WRITABLE;
 static ERL_NIF_TERM ATOM_MODIFIED;
 static ERL_NIF_TERM ATOM_NOT_FOUND;
@@ -206,7 +194,6 @@ static ERL_NIF_TERM ATOM_OUT_OF_MEMORY;
 static ERL_NIF_TERM ATOM_PREAD_ERROR;
 static ERL_NIF_TERM ATOM_PWRITE_ERROR;
 static ERL_NIF_TERM ATOM_READY;
-static ERL_NIF_TERM ATOM_SETFL_ERROR;
 static ERL_NIF_TERM ATOM_TRUE;
 static ERL_NIF_TERM ATOM_UNDEFINED;
 static ERL_NIF_TERM ATOM_EOF;
@@ -232,7 +219,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
 ERL_NIF_TERM bitcask_nifs_keydir_itr_release(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_keydir_release(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
-ERL_NIF_TERM bitcask_nifs_keydir_trim_fstats(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
+ERL_NIF_TERM bitcask_nifs_keydir_add_file(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
+ERL_NIF_TERM bitcask_nifs_keydir_remove_file(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 
 ERL_NIF_TERM bitcask_nifs_increment_file_id(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 
@@ -255,7 +243,6 @@ ERL_NIF_TERM bitcask_nifs_file_seekbof(ErlNifEnv* env, int argc, const ERL_NIF_T
 ERL_NIF_TERM bitcask_nifs_file_truncate(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 
 ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
-ERL_NIF_TERM bitcask_nifs_set_pending_delete(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 
 ERL_NIF_TERM errno_atom(ErlNifEnv* env, int error);
 ERL_NIF_TERM errno_error_tuple(ErlNifEnv* env, ERL_NIF_TERM key, int error);
@@ -285,7 +272,8 @@ static ErlNifFunc nif_funcs[] =
     {"keydir_itr_release", 1, bitcask_nifs_keydir_itr_release},
     {"keydir_info", 1, bitcask_nifs_keydir_info},
     {"keydir_release", 1, bitcask_nifs_keydir_release},
-    {"keydir_trim_fstats", 2, bitcask_nifs_keydir_trim_fstats},
+    {"keydir_add_file", 2, bitcask_nifs_keydir_add_file},
+    {"keydir_remove_file", 2, bitcask_nifs_keydir_remove_file},
 
     {"increment_file_id", 1, bitcask_nifs_increment_file_id},
     {"increment_file_id", 2, bitcask_nifs_increment_file_id},
@@ -305,13 +293,14 @@ static ErlNifFunc nif_funcs[] =
     {"file_position_int",  2, bitcask_nifs_file_position},
     {"file_seekbof_int", 1, bitcask_nifs_file_seekbof},
     {"file_truncate_int", 1, bitcask_nifs_file_truncate},
-    {"update_fstats", 8, bitcask_nifs_update_fstats},
-    {"set_pending_delete", 2, bitcask_nifs_set_pending_delete}
+    {"update_fstats", 7, bitcask_nifs_update_fstats}
 };
 
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     int init_result;
+    keydir_init_params_t keydir_init_params;
+
     // First, setup a resource for our handle
     bitcask_keydir_handle* handle =
         enif_alloc_resource_compat(env,
@@ -325,7 +314,10 @@ ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TE
     bitcask_keydir* keydir = malloc(sizeof(bitcask_keydir));
     memset(keydir, '\0', sizeof(bitcask_keydir));
 
-    init_result = keydir_common_init(keydir, ".", 1024, 1024);
+    keydir_default_init_params(&keydir_init_params);
+    // Use separate fstats obj per scheduler to maximize concurrency.
+    keydir_init_params.fstats_idx_fun = erts_get_scheduler_id;
+    init_result = keydir_common_init(keydir, &keydir_init_params);
 
     if (init_result)
     {
@@ -336,8 +328,6 @@ ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TE
 
     // Assign the keydir to our handle and hand it back
     handle->keydir = keydir;
-    handle->fstats = kh_init(fstats);
-    handle->fstats_mutex = enif_mutex_create(0);
     ERL_NIF_TERM result = enif_make_resource(env, handle);
     enif_release_resource_compat(env, handle);
     return enif_make_tuple2(env, ATOM_OK, result);
@@ -403,15 +393,19 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
         }
         else
         {
+            keydir_init_params_t keydir_init_params;
             int init_ret;
 
-            // No such keydir, create a new one and add to the globals list. Make sure
-            // to allocate enough room for the name.
+            // No such keydir, create a new one and add to the globals list.
+            // Make sure to allocate enough room for the name.
             keydir = malloc(sizeof(bitcask_keydir) + name_sz + 1);
             memset(keydir, '\0', sizeof(bitcask_keydir) + name_sz + 1);
             strncpy(keydir->name, name, name_sz + 1);
 
-            init_ret = keydir_common_init(keydir, ".", 1024, 1024);
+            keydir_default_init_params(&keydir_init_params);
+            keydir_init_params.fstats_idx_fun = erts_get_scheduler_id;
+            init_ret = keydir_common_init(keydir, &keydir_init_params);
+
             if (init_ret)
             {
                 ERL_NIF_TERM error_code = errno_atom(env, init_ret);
@@ -438,8 +432,6 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TE
                                                                    sizeof(bitcask_keydir_handle));
         memset(handle, '\0', sizeof(bitcask_keydir_handle));
         handle->keydir = keydir;
-        handle->fstats = kh_init(fstats);
-        handle->fstats_mutex = enif_mutex_create(0);
         ERL_NIF_TERM result = enif_make_resource(env, handle);
         enif_release_resource_compat(env, handle);
 
@@ -492,34 +484,13 @@ ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc, const ERL_NIF_
             && enif_get_int(env, argv[6], &total_bytes_increment)
             && enif_get_int(env, argv[7], &should_create))
     {
-        update_fstats(handle->fstats, handle->fstats_mutex,
-                      file_id, tstamp, MAX_EPOCH,
+        bitcask_keydir * keydir = handle->keydir;
+        unsigned fstats_idx = keydir->fstats_idx_fun() % keydir->num_fstats;
+        fstats_handle_t * fstats_handle = keydir->fstats_array + fstats_idx;
+        update_fstats(fstats_handle->fstats, fstats_handle->mutex,
+                      file_id, tstamp,
                       live_increment, total_increment,
-                      live_bytes_increment, total_bytes_increment,
-                      should_create);
-        return ATOM_OK;
-    }
-    else
-    {
-        return enif_make_badarg(env);
-    }
-}
-
-ERL_NIF_TERM bitcask_nifs_set_pending_delete(ErlNifEnv* env, int argc,
-        const ERL_NIF_TERM argv[])
-{
-    bitcask_keydir_handle* handle;
-    uint32_t file_id;
-
-    if (argc == 2
-            && enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
-                (void**)&handle)
-            && enif_get_uint(env, argv[1], &file_id))
-    {
-        // TODO: Should we really do this on the global fstats?
-        update_fstats(handle->keydir->fstats, handle->keydir->mutex,
-                      file_id, 0, handle->keydir->epoch,
-                      0, 0, 0, 0, 0);
+                      live_bytes_increment, total_bytes_increment);
         return ATOM_OK;
     }
     else
@@ -610,7 +581,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
 
         ret_code = keydir_get(keydir, key.data, key.size, epoch, &entry);
 
-        if (ret_code == KEYDIR_GET_FOUND && !entry.is_tombstone)
+        if (ret_code == KEYDIR_GET_FOUND && !is_tombstone_entry(&entry))
         {
             ERL_NIF_TERM result;
             result = enif_make_tuple6(env,
@@ -873,7 +844,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc, const ERL_NIF_TE
         {
             if (kh_exist(keydir->fstats, itr))
             {
-                curr_f = kh_val(keydir->fstats, itr);
+                curr_f = &kh_val(keydir->fstats, itr);
                 ERL_NIF_TERM fstat =
                     enif_make_tuple8(env,
                                      enif_make_uint(env, curr_f->file_id),
@@ -883,7 +854,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc, const ERL_NIF_TE
                                      enif_make_ulong(env, curr_f->total_bytes),
                                      enif_make_uint(env, curr_f->oldest_tstamp),
                                      enif_make_uint(env, curr_f->newest_tstamp),
-                                     enif_make_uint64(env, (ErlNifUInt64)curr_f->expiration_epoch));
+                                     enif_make_uint64(env, 0));
                 fstats_list = enif_make_list_cell(env, fstat, fstats_list);
             }
         }
@@ -959,45 +930,37 @@ ERL_NIF_TERM bitcask_nifs_increment_file_id(ErlNifEnv* env, int argc, const ERL_
     }
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_trim_fstats(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_add_files(ErlNifEnv* env, int argc,
+                                           const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
-    ERL_NIF_TERM head, tail, list;
-    uint32_t non_existent_entries = 0;
+    uint32_t file_id;
 
-    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle)&&
-        enif_is_list(env, argv[1]))
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle)
+        && enif_get_uint(env, argv[1], &file_id))
     {
-        bitcask_keydir* keydir = handle->keydir;
-        
-        LOCK(keydir);
-        uint32_t file_id;
+        keydir_remove_file(handle->keydir, file_id);
+        return ATOM_OK;
+    }
+    else
+    {
+        return enif_make_badarg(env);
+    }
+}
 
-        list = argv[1];
+ERL_NIF_TERM bitcask_nifs_keydir_remove_file(ErlNifEnv* env, int argc,
+                                             const ERL_NIF_TERM argv[])
+{
+    bitcask_keydir_handle* handle;
+    uint32_t file_id;
 
-        while (enif_get_list_cell(env, list, &head, &tail))
-        {
-            enif_get_uint(env, head, &file_id);
-
-            khiter_t itr = kh_get(fstats, keydir->fstats, file_id);
-            if (itr != kh_end(keydir->fstats))
-            {
-                bitcask_fstats_entry* curr_f;
-                curr_f = kh_val(keydir->fstats, itr);
-                free(curr_f);
-                kh_del(fstats, keydir->fstats, itr);
-            }
-            else
-            {
-                non_existent_entries++;
-            }
-            // if not found, noop, but shouldn't happen.
-            // think about chaning the retval to signal for warning?
-            list = tail;
-        }
-        UNLOCK(keydir);
-        return enif_make_tuple2(env, ATOM_OK, 
-                                enif_make_uint(env, non_existent_entries));
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle)
+        && enif_get_uint(env, argv[1], &file_id))
+    {
+        keydir_remove_file(handle->keydir, file_id);
+        return ATOM_OK;
     }
     else
     {
@@ -1570,6 +1533,12 @@ static void bitcask_nifs_iterator_resource_cleanup(ErlNifEnv* env, void* arg)
     enif_mutex_destroy(handle->mutex);
 }
 
+static void free_fstats_handle(fstats_handle_t * handle)
+{
+    free_fstats(handle->fstats);
+    enif_mutex_destroy(handle->mutex);
+}
+
 static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
 {
     bitcask_keydir_handle* handle = (bitcask_keydir_handle*)arg;
@@ -1631,9 +1600,6 @@ static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
     {
         free_keydir(keydir);
     }
-
-    free_fstats(handle->fstats);
-    enif_mutex_destroy(handle->fstats_mutex);
 }
 
 static void bitcask_nifs_lock_resource_cleanup(ErlNifEnv* env, void* arg)
@@ -1713,11 +1679,6 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_FALSE = enif_make_atom(env, "false");
     ATOM_FSTAT_ERROR = enif_make_atom(env, "fstat_error");
     ATOM_FTRUNCATE_ERROR = enif_make_atom(env, "ftruncate_error");
-    ATOM_GETFL_ERROR = enif_make_atom(env, "getfl_error");
-    ATOM_ILT_CREATE_ERROR = enif_make_atom(env, "ilt_create_error");
-    ATOM_ITERATION_IN_PROCESS = enif_make_atom(env, "iteration_in_process");
-    ATOM_ITERATION_NOT_PERMITTED = enif_make_atom(env, "iteration_not_permitted");
-    ATOM_ITERATION_NOT_STARTED = enif_make_atom(env, "iteration_not_started");
     ATOM_LOCK_NOT_WRITABLE = enif_make_atom(env, "lock_not_writable");
     ATOM_MODIFIED = enif_make_atom(env, "modified");
     ATOM_NOT_FOUND = enif_make_atom(env, "not_found");
@@ -1728,7 +1689,6 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_PREAD_ERROR = enif_make_atom(env, "pread_error");
     ATOM_PWRITE_ERROR = enif_make_atom(env, "pwrite_error");
     ATOM_READY = enif_make_atom(env, "ready");
-    ATOM_SETFL_ERROR = enif_make_atom(env, "setfl_error");
     ATOM_TRUE = enif_make_atom(env, "true");
     ATOM_UNDEFINED = enif_make_atom(env, "undefined");
     ATOM_EOF = enif_make_atom(env, "eof");

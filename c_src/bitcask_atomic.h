@@ -32,7 +32,7 @@
  #include <atomic.h>
 #endif
 
-static uint64_t bc_atomic_incr64(volatile uint64_t * ptr)
+static uint64_t bc_atomic_incr_64(volatile uint64_t * ptr)
 {
 #if BITCASK_IS_SOLARIS
     return atomic_inc_64_nv(ptr);
@@ -41,12 +41,30 @@ static uint64_t bc_atomic_incr64(volatile uint64_t * ptr)
 #endif
 }
 
-static uint32_t bc_atomic_incr32(volatile uint32_t * ptr)
+static uint32_t bc_atomic_incr_32(volatile uint32_t * ptr)
 {
 #if BITCASK_IS_SOLARIS
     return atomic_inc_32_nv(ptr);
 #else
     return __sync_add_and_fetch(ptr, 1);
+#endif
+}
+
+static uint64_t bc_atomic_add_64(volatile uint64_t * ptr, int64_t val)
+{
+#if BITCASK_IS_SOLARIS
+    return atomic_add_64_nv(ptr, val);
+#else
+    return __sync_add_and_fetch(ptr, val);
+#endif
+}
+
+static uint32_t bc_atomic_add_32(volatile uint32_t * ptr, int32_t val)
+{
+#if BITCASK_IS_SOLARIS
+    return atomic_add_32_nv(ptr, val);
+#else
+    return __sync_add_and_fetch(ptr, val);
 #endif
 }
 

@@ -19,9 +19,6 @@ pr156_regression1_test_() ->
     %% bitcask_pulse.erl counterexample.  Given the fragility of
     %% reusing eqc:check/2 if the model ever changes, I felt it best
     %% to make a standalone EUnit test that will be much more stable.
-    %%
-    %% Run the test 5 times, to try to avoid getting lucky in an
-    %% unlikely race with the 'bitcask_merge_delete' server.
     {timeout, 120,
      fun() ->
              [ok = pr156_regression1(X) || X <- lists:seq(1,5)]

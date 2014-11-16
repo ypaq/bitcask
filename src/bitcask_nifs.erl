@@ -39,10 +39,11 @@
          keydir_frozen/2,
          keydir_info/1,
          keydir_release/1,
+         keydir_add_file/2,
+         keydir_remove_file/2,
          increment_file_id/1,
          increment_file_id/2,
-         keydir_trim_fstats/2,
-         update_fstats/8,
+         update_fstats/7,
          set_pending_delete/2,
          lock_acquire/2,
          lock_release/1,
@@ -259,17 +260,22 @@ keydir_info(_Ref) ->
 keydir_release(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_trim_fstats(reference(), [integer()]) ->
+-spec keydir_add_file(reference(), [integer()]) ->
         {ok, integer()} | {error, atom()}.
-keydir_trim_fstats(_Ref, _IDList) ->
+keydir_add_file(_Ref, _IDList) ->
+    erlang:nif_error({error, not_loaded}).
+
+-spec keydir_remove_file(reference(), [integer()]) ->
+        {ok, integer()} | {error, atom()}.
+keydir_remove_file(_Ref, _IDList) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec update_fstats(reference(), non_neg_integer(), non_neg_integer(),
-                    integer(), integer(), integer(), integer(), integer() ) ->
+                    integer(), integer(), integer(), integer()) ->
     ok.
 update_fstats(_Ref, _FileId, _Tstamp,
               _LiveKeyIncr, _TotalKeyIncr,
-              _LiveIncr, _TotalIncr, _ShouldCreate) ->
+              _LiveIncr, _TotalIncr) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec set_pending_delete(reference(), non_neg_integer()) ->

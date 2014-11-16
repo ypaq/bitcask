@@ -33,18 +33,6 @@
 #define MAX_OFFSET ((uint64_t)-1)
 #define MAX_PAGE_IDX ((uint32_t)-1)
 
-typedef struct
-{
-    uint32_t file_id;
-    uint64_t live_keys;   // number of 'live' keys in entries and pending
-    uint64_t live_bytes;  // number of 'live' bytes
-    uint64_t total_keys;  // total number of keys written to file
-    uint64_t total_bytes; // total number of bytes written to file
-    uint32_t oldest_tstamp; // oldest observed tstamp in a file
-    uint32_t newest_tstamp; // newest observed tstamp in a file
-    uint64_t expiration_epoch; // file obsolete at this epoch
-} bitcask_fstats_entry;
-
 // Entry fields carefully laid out to correspond with ENTRY_*_OFFSET
 // constants and layout in pages. Change with care!
 typedef struct
@@ -57,14 +45,29 @@ typedef struct
     uint32_t next;
     uint32_t key_size;
     uint8_t *key;
-
-    // Convenience field: make function instead.
-    uint8_t  is_tombstone;
 } keydir_entry_t;
 
-KHASH_MAP_INIT_INT(fstats, bitcask_fstats_entry*);
+int is_tombstone_entry(keydir_entry_t * entry);
 
+typedef struct
+{
+    uint32_t file_id;
+    uint64_t live_keys;   // number of 'live' keys in entries and pending
+    uint64_t live_bytes;  // number of bytes used by 'live' keys
+    uint64_t total_keys;  // total number of keys written to file
+    uint64_t total_bytes; // total number of bytes written to file
+    uint32_t oldest_tstamp; // oldest observed tstamp in a file
+    uint32_t newest_tstamp; // newest observed tstamp in a file
+} bitcask_fstats_entry;
+
+KHASH_MAP_INIT_INT(fstats, bitcask_fstats_entry);
 typedef khash_t(fstats) fstats_hash_t;
+
+typedef struct
+{
+    fstats_hash_t*  fstats;
+    ErlNifMutex *   mutex;
+} fstats_handle_t;
 
 typedef struct keydir_itr_struct keydir_itr_t;
 
@@ -108,6 +111,7 @@ struct swap_array_struct
 
 typedef struct swap_array_struct swap_array_t;
 
+typedef unsigned (*fstats_idx_fun_t)();
 
 typedef struct
 {
@@ -127,7 +131,17 @@ typedef struct
 
     volatile uint64_t key_count;
     volatile uint64_t key_bytes;
-    fstats_hash_t*    fstats;
+    // Already aggregated file stats
+    fstats_hash_t *   fstats;
+    // Partial file stats that will be aggregated into the global ones
+    // on demand so they can be concurrently updated.
+    unsigned          num_fstats;
+    fstats_handle_t * fstats_array;
+
+    // Function that returns the index of the partial file stats object to use
+    // Either random or mapping to a fixed number of logical threads to avoid
+    // contention.
+    fstats_idx_fun_t fstats_idx_fun;
 
     keydir_itr_array_t itr_array;
 
@@ -137,26 +151,41 @@ typedef struct
     char              name[0];
 } bitcask_keydir;
 
+typedef struct
+{
+    keydir_itr_t * itr;
+    // Iterators are not multi-thread safe. Lock to use.
+    // Should we just assume multi-thread use and move mutex to iterator?
+    ErlNifMutex *  mutex;
+} bitcask_iterator_handle;
+
 /////////////////////////////////////////////////////////////////////////
 // Public Keydir API
 
-int keydir_common_init(bitcask_keydir * keydir,
-                               const char * basedir,
-                               uint32_t num_pages,
-                               uint32_t initial_num_swap_pages);
+typedef struct
+{
+    const char * basedir;
+    uint32_t num_pages;
+    uint32_t initial_num_swap_pages;
+    fstats_idx_fun_t fstats_idx_fun;
+} keydir_init_params_t;
+
+void keydir_default_init_params(keydir_init_params_t * params);
+int keydir_common_init(bitcask_keydir * keydir, keydir_init_params_t * params);
 
 void free_keydir(bitcask_keydir* keydir);
+
+void keydir_add_file(bitcask_keydir * keydir, uint32_t file_id);
+void keydir_remove_file(bitcask_keydir * keydir, uint32_t file_id);
 
 void update_fstats(fstats_hash_t * fstats,
                    ErlNifMutex * mutex,
                    uint32_t file_id,
                    uint32_t tstamp,
-                   uint64_t expiration_epoch,
                    int32_t live_increment,
                    int32_t total_increment,
                    int32_t live_bytes_increment,
-                   int32_t total_bytes_increment,
-                   int32_t should_create);
+                   int32_t total_bytes_increment);
 
 void free_fstats(fstats_hash_t * fstats);
 
@@ -196,7 +225,7 @@ struct keydir_itr_struct
 {
     bitcask_keydir * keydir;
     // Defines the snapshot to iterate over. If set to MAX_EPOCH, the most
-    // recent entries will be observed in an undefined order.
+    // recent entries will be observed in an undefined visit order.
     uint64_t epoch;
     // Page we are currently visiting. If MAX_PAGE_IDX, iteration has not
     // started. If equal to keydir->num_pages, iteration has ended. 
