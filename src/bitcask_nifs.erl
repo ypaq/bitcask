@@ -522,9 +522,9 @@ keydir_del_while_pending_test2() ->
                                 offset = <<0:64/unsigned-native>>, tstamp = T},
                  keydir_get_int(Ref1, Key, 16#ffffffffffffffff)),
     {ready, Ref2} = keydir_new(Name),
+    %% Start keyfold iterator on Ref2
+    {ok, Itr} = keydir_itr(Ref2),
     try
-        %% Start keyfold iterator on Ref2
-        {ok, Itr} = keydir_itr(Ref2),
         %% Delete Key
         ?assertEqual(ok, keydir_remove(Ref1, Key)),
         ?assertEqual(not_found, keydir_get(Ref1, Key)),
