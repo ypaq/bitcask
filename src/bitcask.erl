@@ -699,7 +699,7 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
     %% close keydirs, and release our lock
     bitcask_fileops:close_all(State#mstate.input_files ++ ExpiredFilesFinished),
     DelFiles = [F || F <- State1#mstate.delete_files ++ ExpiredFilesFinished],
-    _ = [bitcask_fileops:delete(DelFile) || DelFile <- DelFiles],
+    _ = [bitcask_fileops:delete(DelFile, LiveKeyDir) || DelFile <- DelFiles],
 
     %% Explicitly release our keydirs instead of waiting for GC
     bitcask_nifs:keydir_release(LiveKeyDir),
@@ -989,13 +989,10 @@ status(Ref) ->
                  F#file_status.dead_bytes, F#file_status.total_bytes} || F <- Summary]}.
 
 current_files(Dirname, Keydir) ->
-    {_, _, Fstats, {_, _, _, PendingEpoch}, Epoch} =
+    {_, _, Fstats, {_, _, _, _}, Epoch} =
         bitcask_nifs:keydir_info(Keydir),
-    CappedEpoch = min(PendingEpoch, Epoch),
-    FStatus = [summarize(Dirname, F) || F <- Fstats],
-    CurrentFiles = [F || F <- FStatus,
-                         CappedEpoch < F#file_status.expiration_epoch],
-    {CappedEpoch, CurrentFiles}.
+    CurrentFiles = [summarize(Dirname, F) || F <- Fstats],
+    {Epoch, CurrentFiles}.
 
 -spec summary_info(reference()) -> {integer(), [#file_status{}]}.
 summary_info(Ref) ->
@@ -1142,6 +1139,7 @@ scan_key_files([Filename | Rest], KeyDir, Acc, CloseFile, KT) ->
             %% tombstones or data errors.  Otherwise we risk of
             %% reusing the file id for new data.
             _ = bitcask_nifs:increment_file_id(KeyDir, FileTstamp),
+            bitcask_nifs:keydir_add_file(KeyDir, FileTstamp),
             F = fun({tombstone, K}, _Tstamp, {_Offset, _TotalSz}, _) ->
                         _ = bitcask_nifs:keydir_remove(KeyDir, KT(K));
                    (K, Tstamp, {Offset, TotalSz}, _) ->

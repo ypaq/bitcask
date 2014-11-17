@@ -33,7 +33,7 @@
          write/4,
          read/3,
          sync/1,
-         delete/1,
+         delete/2,
          fold/3,
          fold_keys/3, fold_keys/4,
          mk_filename/2,
@@ -74,9 +74,9 @@ create_file(DirName, Opts0, Keydir) ->
     case get_create_lock(DirName) of
         {ok, Lock} ->
             try 
-                {ok, Newest} = bitcask_nifs:increment_file_id(Keydir),
+                {ok, NewFileId} = bitcask_nifs:increment_file_id(Keydir),
 
-                Filename = mk_filename(DirName, Newest),
+                Filename = mk_filename(DirName, NewFileId),
                 ok = ensure_dir(Filename),
 
                 %% Check for o_sync strategy and add to opts
@@ -90,9 +90,10 @@ create_file(DirName, Opts0, Keydir) ->
 
                 {ok, FD} = bitcask_io:file_open(Filename, FinalOpts),
                 HintFD = open_hint_file(Filename, FinalOpts),
+                bitcask_nifs:keydir_add_file(Keydir, NewFileId),
                 {ok, #filestate{mode = read_write,
                                 filename = Filename,
-                                tstamp = file_tstamp(Filename),
+                                tstamp = NewFileId,
                                 hintfd = HintFD, fd = FD, ofs = 0}}
             catch Error:Reason ->
                     %% if we fail somehow, do we need to nuke any partial
@@ -271,12 +272,13 @@ data_file_tstamps(Dirname) ->
     end.
 
 %% @doc Use only after merging, to permanently delete a data file.
--spec delete(#filestate{}) -> ok | {error, atom()}.
-delete(#filestate{ filename = FN } = State) ->
+-spec delete(#filestate{}, reference()) -> ok | {error, atom()}.
+delete(#filestate{ filename = FN, tstamp = FileId } = FileState, Keydir) ->
     _ = file:delete(FN),
-    case has_hintfile(State) of
+    bitcask_nifs:keydir_remove_file(Keydir, FileId),
+    case has_hintfile(FileState) of
         true ->
-            file:delete(hintfile_name(State));
+            file:delete(hintfile_name(FileState));
         false ->
             ok
     end.

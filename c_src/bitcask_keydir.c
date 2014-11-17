@@ -72,8 +72,15 @@ static void free_swap_array(swap_array_t * swap_array)
 
 static void free_fstats_handle(fstats_handle_t * handle)
 {
-    free_fstats(handle->fstats);
-    enif_mutex_destroy(handle->mutex);
+    if (handle->fstats)
+    {
+        free_fstats(handle->fstats);
+    }
+
+    if (handle->mutex)
+    {
+        enif_mutex_destroy(handle->mutex);
+    }
 }
 
 void free_fstats(fstats_hash_t * fstats)
@@ -92,7 +99,6 @@ static void keydir_free_memory(bitcask_keydir * keydir)
         ftruncate(keydir->swap_file_desc, 0);
         close(keydir->swap_file_desc);
     }
-
 
     for(idx = 0; idx < keydir->num_pages; ++idx)
     {
@@ -117,12 +123,16 @@ static void keydir_free_memory(bitcask_keydir * keydir)
     }
 
     free_fstats(keydir->fstats);
+
     for (idx = 0; idx < keydir->num_fstats; ++idx)
     {
         free_fstats_handle(keydir->fstats_array + idx);
     }
 
+    free(keydir->fstats_array);
+
     keydir->fstats = NULL;
+    keydir->fstats_array = NULL;
     keydir->swap_pages = NULL;
     keydir->mem_pages = NULL;
     keydir->buffer = NULL;
@@ -222,6 +232,7 @@ void keydir_default_init_params(keydir_init_params_t * params)
     params->num_pages = KEYDIR_DEFAULT_NUM_PAGES;
     params->initial_num_swap_pages = KEYDIR_DEFAULT_NUM_INITIAL_SWAP_PAGES;
     params->fstats_idx_fun = default_fstats_idx_fun;
+    params->num_fstats = 64;
 }
 
 /*
@@ -240,6 +251,8 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->mem_pages = NULL;
     keydir->swap_pages = NULL;
     keydir->tmp_fstats = NULL;
+    keydir->fstats_array = NULL;
+    keydir->fstats = NULL;
 
     keydir->itr_array.items = NULL;
     keydir->itr_array.count = 0;
@@ -250,6 +263,7 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->num_swap_pages = params->initial_num_swap_pages;
     keydir->epoch = 0;
     keydir->min_epoch = MAX_EPOCH;
+    keydir->num_fstats = params->num_fstats;
     keydir->fstats_idx_fun = params->fstats_idx_fun;
 
     keydir->mutex = enif_mutex_create(keydir->name);
@@ -259,9 +273,12 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->mem_pages = malloc(sizeof(mem_page_t) * params->num_pages);
     keydir->swap_pages = malloc(sizeof(swap_array_t));
     keydir->tmp_fstats = kh_init(fstats);
+    keydir->fstats = kh_init(fstats);
+    keydir->fstats_array = calloc(params->num_fstats, sizeof(fstats_handle_t));
     
     if (!keydir->mutex || !keydir->swap_grow_mutex || !keydir->buffer
-        || !keydir->mem_pages || !keydir->swap_pages || !keydir->tmp_fstats)
+        || !keydir->mem_pages || !keydir->swap_pages || !keydir->tmp_fstats
+        || !keydir->fstats_array)
     {
         keydir_free_memory(keydir);
         return ENOMEM;
@@ -308,7 +325,13 @@ int keydir_common_init(bitcask_keydir * keydir,
         return ret_code;
     }
 
-    keydir->fstats = kh_init(fstats);
+    uint32_t i;
+    for (i = 0; i < keydir->num_fstats; ++i)
+    {
+        keydir->fstats_array[i].mutex = enif_mutex_create(0);
+        keydir->fstats_array[i].fstats = kh_init(fstats);
+    }
+
     return 0; // Sweet success!!
 }
 
@@ -457,7 +480,7 @@ void keydir_aggregate_fstats(bitcask_keydir * keydir)
 
                 if (gitr != kh_end(kd_fstats))
                 {
-                    bitcask_fstats_entry * gentry = &kh_val(fstats, gitr);
+                    bitcask_fstats_entry * gentry = &kh_val(kd_fstats, gitr);
                     merge_fstats_entry(pentry, gentry);
                 }
 
@@ -1562,6 +1585,10 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
         {
             update_fstats(fstats_handle->fstats, NULL /* don't lock */,
                           found_file_id, 0, -1, 0, -found_size, 0); 
+        }
+        else
+        {
+            bc_atomic_add_64(&keydir->key_count, 1);
         }
 
         update_fstats(fstats_handle->fstats, NULL /* don't lock */,

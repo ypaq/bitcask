@@ -150,7 +150,7 @@ typedef struct
     uint32_t          biggest_file_id;
     unsigned          refcount;
     char              is_ready;
-    char              name[0];
+    char              name[1];
 } bitcask_keydir;
 
 typedef struct
@@ -169,6 +169,7 @@ typedef struct
     const char * basedir;
     uint32_t num_pages;
     uint32_t initial_num_swap_pages;
+    uint32_t num_fstats;
     fstats_idx_fun_t fstats_idx_fun;
 } keydir_init_params_t;
 

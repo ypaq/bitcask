@@ -260,14 +260,14 @@ keydir_info(_Ref) ->
 keydir_release(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_add_file(reference(), [integer()]) ->
+-spec keydir_add_file(reference(), integer()) ->
         {ok, integer()} | {error, atom()}.
-keydir_add_file(_Ref, _IDList) ->
+keydir_add_file(_Ref, _FileId) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_remove_file(reference(), [integer()]) ->
+-spec keydir_remove_file(reference(), integer()) ->
         {ok, integer()} | {error, atom()}.
-keydir_remove_file(_Ref, _IDList) ->
+keydir_remove_file(_Ref, _FileId) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec update_fstats(reference(), non_neg_integer(), non_neg_integer(),
