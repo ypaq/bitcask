@@ -130,6 +130,7 @@ static void keydir_free_memory(bitcask_keydir * keydir)
     }
 
     free(keydir->fstats_array);
+    free(keydir->dirname);
 
     keydir->fstats = NULL;
     keydir->fstats_array = NULL;
