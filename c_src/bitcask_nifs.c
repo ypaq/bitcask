@@ -415,7 +415,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc,
         }
         else
         {
-            keydir = create_keydir(NULL, ".");
+            keydir = create_keydir(name, name);
 
             if (!keydir)
             {

@@ -2192,7 +2192,6 @@ expire_merge_test2() ->
     bitcask:close(M),
 
     %% With lazy merge file creation there will be no files.
-    ok = bitcask_merge_delete:testonly__delete_trigger(),
     0 = length(readable_files("/tmp/bc.test.mergeexpire")),
 
     %% Make sure all the data is present
@@ -2577,7 +2576,6 @@ truncated_merge_test2() ->
     M = bitcask:open(Dir),
     ok = merge(Dir),
     bitcask:close(M),
-    ok = bitcask_merge_delete:testonly__delete_trigger(),
 
     %% Verify we've now only got one file
     1 = length(readable_files(Dir)),

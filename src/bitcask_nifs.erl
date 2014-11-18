@@ -479,19 +479,6 @@ keydir_named_not_ready_test2() ->
 
     {error, not_ready} = keydir_new("k2").
 
-keydir_itr_while_itr_error_test_() ->
-    {timeout, 60, fun keydir_itr_while_itr_error_test2/0}.
-
-keydir_itr_while_itr_error_test2() ->
-    {ok, Ref1} = keydir_new(),
-    {ok, Itr} = keydir_itr(Ref1),
-    try
-        ?assertEqual({error, iteration_in_process},
-                     keydir_itr(Itr))
-    after
-        keydir_itr_release(Itr)
-    end.
-
 keydir_double_itr_test_() -> % check iterating flag is cleared
     {timeout, 60, fun keydir_double_itr_test2/0}.
 
@@ -500,13 +487,6 @@ keydir_double_itr_test2() ->
     Folder = fun(_,Acc) -> Acc end,
     ?assertEqual(acc, keydir_fold(Ref1, Folder, acc)),
     ?assertEqual(acc, keydir_fold(Ref1, Folder, acc)).
-
-keydir_next_notstarted_error_test_() ->
-    {timeout, 60, fun keydir_next_notstarted_error_test2/0}.
-
-keydir_next_notstarted_error_test2() ->
-    {ok, Ref1} = keydir_new(),
-    ?assertEqual({error, iteration_not_started}, keydir_itr_next(Ref1)).
 
 keydir_del_while_pending_test_() ->
     {timeout, 60, fun keydir_del_while_pending_test2/0}.
@@ -619,76 +599,6 @@ keydir_multi_put_during_itr_test2() ->
     bitcask_nifs:keydir_put(Ref, <<"k">>, 123, 3, 20, 3),
     bitcask_nifs:keydir_put(Ref, <<"k">>, 123, 4, 30, 4),
     bitcask_nifs:keydir_itr_release(Itr).
-
-keydir_itr_out_of_date_test_() ->
-    {timeout, 60, fun keydir_itr_out_of_date_test2/0}.
-
-keydir_itr_out_of_date_test2() ->
-    Name = "keydir_itr_out_of_date_test",
-    {not_ready, Ref1} = bitcask_nifs:keydir_new(Name),
-    bitcask_nifs:keydir_mark_ready(Ref1),
-    ok = bitcask_nifs:keydir_itr_int(Ref1, 1000000, 0, 0),
-    put_till_frozen(Ref1, Name),
-    {ready, Ref2} = bitcask_nifs:keydir_new(Name),
-    %% now() will have ensured a new usecs for keydir_itr/3 - check out of date immediately
-    ?assertEqual(out_of_date, bitcask_nifs:keydir_itr_int(Ref2, 1000001,
-                                                          0, 0)),
-    keydir_itr_release(Ref1),
-    ?assertEqual(ok, receive
-                         ready ->
-                             ok
-                     after
-                         1000 ->
-                             timeout
-                     end).
-
-put_till_frozen(R, Name) ->
-    bitcask_nifs:keydir_put(R, crypto:rand_bytes(32), 0, 1234, 0, 1),
-    {ready, Ref2} = bitcask_nifs:keydir_new(Name),
-    %%?debugFmt("Putting", []),
-    case bitcask_nifs:keydir_itr_int(Ref2, 2000001,
-                                     0, 0) of
-        ok ->
-            %%?debugFmt("keydir still OK", []),
-            bitcask_nifs:keydir_itr_release(Ref2),
-            put_till_frozen(R, Name);
-        out_of_date ->
-            %%?debugFmt("keydir now frozen", []),
-            bitcask_nifs:keydir_itr_release(Ref2),
-            ok
-    end.
-
-keydir_itr_many_pending_test_() ->
-    {timeout, 60, fun keydir_itr_many_pending_test2/0}.
-
-keydir_itr_many_pending_test2() ->
-    Name = "keydir_itr_many_out_of_date_test",
-    {not_ready, Ref1} = bitcask_nifs:keydir_new(Name),
-    bitcask_nifs:keydir_mark_ready(Ref1),
-
-    ok = bitcask_nifs:keydir_itr_int(Ref1, 1000000, 0, 0),
-    put_till_frozen(Ref1, Name),
-    Me = self(),
-    F = fun() ->
-                {ready, Ref2} = bitcask_nifs:keydir_new(Name),
-                out_of_date = bitcask_nifs:keydir_itr_int(Ref2, 1000001,
-                                                          0, 0),
-                Me ! {ready, self()},
-                receive
-                    ready ->
-                        Me ! {done, self()}
-                end
-        end,
-    %% Check the pending_awaken array grows nicely
-    Pids = [proc_lib:spawn_link(F) || _X <- lists:seq(1, 100)],
-    ?assertEqual(lists:usort([receive {ready, Pid} -> ready
-                              after 500 -> {timeout, Pid}
-                              end || Pid <- Pids]), [ready]),
-    %% Wake them up and check them.
-    keydir_itr_release(Ref1),
-    ?assertEqual(lists:usort([receive {done, Pid} -> ok
-                              after 500 -> {timeout, Pid}
-                              end || Pid <- Pids]), [ok]).
 
 clear_recv_buffer(Ct) ->
     receive
