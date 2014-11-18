@@ -149,6 +149,7 @@ typedef struct
 
     uint32_t          biggest_file_id;
     unsigned          refcount;
+    char *            dirname;
     char              is_ready;
     char              name[1];
 } bitcask_keydir;

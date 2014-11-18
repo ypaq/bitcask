@@ -488,9 +488,8 @@ ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc, const ERL_NIF_
     uint32_t file_id, tstamp;
     int32_t live_increment, total_increment;
     int32_t live_bytes_increment, total_bytes_increment;
-    int32_t should_create;
 
-    if (argc == 8
+    if (argc == 7
             && enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
                 (void**)&handle)
             && enif_get_uint(env, argv[1], &file_id)
@@ -498,8 +497,7 @@ ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc, const ERL_NIF_
             && enif_get_int(env, argv[3], &live_increment)
             && enif_get_int(env, argv[4], &total_increment)
             && enif_get_int(env, argv[5], &live_bytes_increment)
-            && enif_get_int(env, argv[6], &total_bytes_increment)
-            && enif_get_int(env, argv[7], &should_create))
+            && enif_get_int(env, argv[6], &total_bytes_increment))
     {
         bitcask_keydir * keydir = handle->keydir;
         unsigned fstats_idx = keydir->fstats_idx_fun() % keydir->num_fstats;

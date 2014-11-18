@@ -38,58 +38,6 @@
 
 -ifdef(TEST).
 
-multiple_merges_during_fold_test_() ->
-    {timeout, 60, fun multiple_merges_during_fold_body/0}.
-
-multiple_merges_during_fold_body() ->
-    Dir = "/tmp/bc.multiple-merges-fold",
-    B = bitcask:open(Dir, [read_write, {max_file_size, 50}]),
-    PutSome = fun() ->
-                      [bitcask:put(B, <<X:32>>, <<"yo this is a value">>) ||
-                          X <- lists:seq(1,5)]
-              end,
-    PutSome(),
-    PutSome(),
-    Bstuff = get(B),
-    FoldFun = fun(_K, _V, 0) ->
-                      receive go_ahead -> ok end,
-                      1;
-                 (_K, _V, 1) ->
-                      1
-              end,
-    SlowPid = spawn(fun() ->
-                            put(B, Bstuff),
-                            bitcask:fold(B, FoldFun, 0)
-                    end),
-    CountSetuids = fun() ->
-                           Fs = filelib:wildcard(Dir ++ "/*"),
-                           length([F || F <- Fs,
-                                        bitcask:has_pending_delete_bit(F)])
-                   end,
-    PutSome(),
-    Count1 = merge_until(Dir, 0, CountSetuids),
-    PutSome(),
-    bitcask:merge(Dir),
-    PutSome(),
-    merge_until(Dir, Count1, CountSetuids),
-    
-    SlowPid ! go_ahead,
-    timer:sleep(500),
-    ok = ?MODULE:testonly__delete_trigger(),
-    0 = CountSetuids(),
-    
-    ok.
-
-merge_until(Dir, MinCount, CountSetuids) ->
-    bitcask:merge(Dir),
-    Count = CountSetuids(),
-    if (Count > MinCount) ->
-            Count;
-       true ->
-            timer:sleep(100),
-            merge_until(Dir, MinCount, CountSetuids)
-    end.
-    
 regression_gh82_test_() ->
     {timeout, 300, ?_assertEqual(ok, regression_gh82_body())}.
 
