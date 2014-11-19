@@ -54,37 +54,41 @@ values() ->
 ops(Keys, Values) ->
     {oneof([put, delete, itr, itr_next, itr_release]), oneof(Keys), oneof(Values)}.
 
-apply_kv_ops([], Ref, KVs0, Fstats) ->
-    bitcask_nifs:keydir_itr_release(get_keydir(Ref)), % release any iterators
+apply_kv_ops([], _Ref, Itrs, KVs0, Fstats) ->
+    [bitcask_nifs:keydir_itr_release(Itr)||Itr<-Itrs], % release any iterators
     {KVs0, Fstats};
-apply_kv_ops([{put, K, V} | Rest], Ref, KVs0, Fstats0) ->
+apply_kv_ops([{put, K, V} | Rest], Ref, Itrs, KVs0, Fstats0) ->
     ok = bitcask:put(Ref, K, V),
-    apply_kv_ops(Rest, Ref, orddict:store(K, V, KVs0),
+    apply_kv_ops(Rest, Ref, Itrs, orddict:store(K, V, KVs0),
                  update_fstats(put, K ,orddict:find(K, KVs0), V, Fstats0));
-apply_kv_ops([{delete, K, _} | Rest], Ref, KVs0, Fstats0) ->
+apply_kv_ops([{delete, K, _} | Rest], Ref, Itrs, KVs0, Fstats0) ->
     ok = bitcask:delete(Ref, K),
     case orddict:find(K, KVs0) of 
         error -> 
-            apply_kv_ops(Rest, Ref, KVs0, Fstats0);
+            apply_kv_ops(Rest, Ref, Itrs, KVs0, Fstats0);
         {ok, deleted} -> 
-            apply_kv_ops(Rest, Ref, KVs0, Fstats0);
+            apply_kv_ops(Rest, Ref, Itrs, KVs0, Fstats0);
         OldVal ->
-            apply_kv_ops(Rest, Ref, orddict:store(K, deleted, KVs0),
+            apply_kv_ops(Rest, Ref, Itrs, orddict:store(K, deleted, KVs0),
                          update_fstats(delete, K, OldVal,
                                        ?TOMBSTONE0, Fstats0))
     end;
-apply_kv_ops([{itr, _K, _} | Rest], Ref, KVs, Fstats) ->
+apply_kv_ops([{itr, _K, _} | Rest], Ref, Itrs, KVs, Fstats) ->
     %% Don't care about result, just want to intermix with get/put
-    bitcask_nifs:keydir_itr(get_keydir(Ref), -1, -1),
-    apply_kv_ops(Rest, Ref, KVs, Fstats);
-apply_kv_ops([{itr_next, _K, _} | Rest], Ref, KVs, Fstats) ->
+    Itr = bitcask_nifs:keydir_itr(get_keydir(Ref)),
+    apply_kv_ops(Rest, Ref, [Itr|Itrs], KVs, Fstats);
+apply_kv_ops([{itr_next, _K, _} | _]=Ops, Ref, [], KVs, Fstats) ->
+    apply_kv_ops([{itr, k, v}|Ops], Ref, [], KVs, Fstats);
+apply_kv_ops([{itr_next, _K, _} | Rest], Ref, [Itr|_] = Itrs, KVs, Fstats) ->
     %% Don't care about result, just want to intermix with get/put
-    bitcask_nifs:keydir_itr_next(get_keydir(Ref)),
-    apply_kv_ops(Rest, Ref, KVs, Fstats);
-apply_kv_ops([{itr_release, _K, _} | Rest], Ref, KVs, Fstats) ->
+    bitcask_nifs:keydir_itr_next(Itr),
+    apply_kv_ops(Rest, Ref, Itrs, KVs, Fstats);
+apply_kv_ops([{itr_release, _K, _} | Rest], Ref, [], KVs, Fstats) ->
+    apply_kv_ops(Rest, Ref, [], KVs, Fstats);
+apply_kv_ops([{itr_release, _K, _} | Rest], Ref, [Itr|_]=Itrs, KVs, Fstats) ->
     %% Don't care about result, just want to intermix with get/put
-    bitcask_nifs:keydir_itr_release(get_keydir(Ref)),
-    apply_kv_ops(Rest, Ref, KVs, Fstats).
+    bitcask_nifs:keydir_itr_release(Itr),
+    apply_kv_ops(Rest, Ref, Itrs, KVs, Fstats).
 
 
 %% Delete existing key (i.e. write tombstone)
@@ -169,7 +173,8 @@ prop_merge() ->
                      Ref = bitcask:open(Dir,
                                         [read_write, {max_file_size, M1}]),
                      try
-                         {Model, Fstats} = apply_kv_ops(Ops, Ref, [], #m_fstats{}),
+                         {Model, Fstats} = apply_kv_ops(Ops, Ref, [], [],
+                                                        #m_fstats{}),
                          check_fstats(Ref, Fstats),
                          check_model(Ref, Model),
 
@@ -239,7 +244,8 @@ prop_fold() ->
                      Ref = bitcask:open("/tmp/bc.prop.fold",
                                         [read_write, {max_file_size, M1}]),
                      try
-                         {Model, Fstats} = apply_kv_ops(Ops, Ref, [], #m_fstats{}),
+                         {Model, Fstats} = apply_kv_ops(Ops, Ref, [], [],
+                                                        #m_fstats{}),
                          check_fstats(Ref, Fstats),
 
                          %% Build a list of the K/V pairs available to fold

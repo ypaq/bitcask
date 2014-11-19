@@ -113,8 +113,23 @@ typedef struct swap_array_struct swap_array_t;
 
 typedef unsigned (*fstats_idx_fun_t)();
 
+typedef struct bitcask_keydir_struct bitcask_keydir;
+
+KHASH_INIT(global_biggest_file_id, const char*, uint32_t, 1,
+           kh_str_hash_func, kh_str_hash_equal);
+KHASH_INIT(global_keydirs, const char*, bitcask_keydir*, 1,
+           kh_str_hash_func, kh_str_hash_equal);
+
 typedef struct
 {
+    khash_t(global_biggest_file_id)* global_biggest_file_id;
+    khash_t(global_keydirs)* global_keydirs;
+    ErlNifMutex*             global_keydirs_lock;
+} global_keydir_data;
+
+struct bitcask_keydir_struct
+{
+    global_keydir_data * global_data;
     ErlNifMutex *     mutex;
     void *            buffer;
     mem_page_t *      mem_pages;
@@ -150,9 +165,9 @@ typedef struct
     uint32_t          biggest_file_id;
     unsigned          refcount;
     char *            dirname;
+    char *            name;
     char              is_ready;
-    char              name[1];
-} bitcask_keydir;
+};
 
 typedef struct
 {
@@ -167,18 +182,20 @@ typedef struct
 
 typedef struct
 {
-    const char * basedir;
-    uint32_t num_pages;
-    uint32_t initial_num_swap_pages;
-    uint32_t num_fstats;
-    fstats_idx_fun_t fstats_idx_fun;
+    const char *        basedir;
+    uint32_t            num_pages;
+    uint32_t            initial_num_swap_pages;
+    uint32_t            num_fstats;
+    fstats_idx_fun_t    fstats_idx_fun;
 } keydir_init_params_t;
 
 void keydir_default_init_params(keydir_init_params_t * params);
 
-int keydir_common_init(bitcask_keydir * keydir, keydir_init_params_t * params);
+bitcask_keydir * keydir_acquire(global_keydir_data * global_data,
+                                const char * name,
+                                keydir_init_params_t * params);
 
-void free_keydir(bitcask_keydir* keydir);
+void keydir_release(bitcask_keydir* keydir);
 
 void keydir_add_file(bitcask_keydir * keydir, uint32_t file_id);
 

@@ -55,10 +55,7 @@ static void free_swap_array(swap_array_t * swap_array)
 
     if (swap_array)
     {
-        if (swap_array->next)
-        {
-            free_swap_array(swap_array->next);
-        }
+        free_swap_array(swap_array->next);
 
         for (idx = 0; idx < swap_array->size; ++idx)
         {
@@ -105,11 +102,6 @@ static void keydir_free_memory(bitcask_keydir * keydir)
         free(keydir->mem_pages[idx].itr_array.items);
     }
 
-    free(keydir->mem_pages);
-    free(keydir->buffer);
-    free_swap_array(keydir->swap_pages);
-    free(keydir->tmp_fstats);
-
     if (keydir->mutex)
     {
         enif_mutex_destroy(keydir->mutex);
@@ -122,21 +114,27 @@ static void keydir_free_memory(bitcask_keydir * keydir)
         keydir->swap_grow_mutex = NULL;
     }
 
-    free_fstats(keydir->fstats);
-
     for (idx = 0; idx < keydir->num_fstats; ++idx)
     {
         free_fstats_handle(keydir->fstats_array + idx);
     }
 
-    free(keydir->fstats_array);
-    free(keydir->dirname);
-
-    keydir->fstats = NULL;
-    keydir->fstats_array = NULL;
-    keydir->swap_pages = NULL;
+    free(keydir->mem_pages);
     keydir->mem_pages = NULL;
+    free(keydir->fstats_array);
+    keydir->fstats_array = NULL;
+    free(keydir->buffer);
     keydir->buffer = NULL;
+    free_swap_array(keydir->swap_pages);
+    keydir->swap_pages = NULL;
+    free(keydir->tmp_fstats);
+    keydir->tmp_fstats = NULL;
+    free_fstats(keydir->fstats);
+    keydir->fstats = NULL;
+    free(keydir->name);
+    keydir->name = NULL;
+    free(keydir->dirname);
+    keydir->dirname = NULL;
 }
 
 static void keydir_init_free_list(bitcask_keydir * keydir)
@@ -149,7 +147,6 @@ static void keydir_init_free_list(bitcask_keydir * keydir)
     uint32_t offset = 0;
 
     // Notice this will fail miserably if num_pages is ever zero
-
     keydir->free_list_head = 0;
 
     // Set next index on all but last page in sequence
@@ -247,10 +244,13 @@ void keydir_default_init_params(keydir_init_params_t * params)
 /*
  * Returns an errno code or zero if successful. 
  */
-int keydir_common_init(bitcask_keydir * keydir,
-                       keydir_init_params_t *params)
+static int keydir_init(bitcask_keydir * keydir,
+                       const char * name,
+                       keydir_init_params_t * params)
 
 {
+    uint32_t i;
+
     // Avoid unitialized pointers in case we call keydir_free_memory()
     keydir->mutex = NULL;
     keydir->swap_grow_mutex = NULL;
@@ -278,6 +278,7 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir->mutex = enif_mutex_create(keydir->name);
     keydir->swap_grow_mutex = enif_mutex_create(0);
 
+    keydir->name = name ? strdup(name) : NULL;
     keydir->dirname = strdup(params->basedir);
     keydir->buffer = malloc(PAGE_SIZE * params->num_pages);
     keydir->mem_pages = malloc(sizeof(mem_page_t) * params->num_pages);
@@ -295,7 +296,6 @@ int keydir_common_init(bitcask_keydir * keydir,
     keydir_init_mem_pages(keydir);
     keydir_init_free_list(keydir);
 
-    uint32_t i;
     for (i = 0; i < keydir->num_fstats; ++i)
     {
         keydir->fstats_array[i].mutex = enif_mutex_create(0);
@@ -303,6 +303,38 @@ int keydir_common_init(bitcask_keydir * keydir,
     }
 
     return 0; // Sweet success!!
+}
+
+bitcask_keydir * keydir_acquire(global_keydir_data * gkd,
+                                const char * name,
+                                keydir_init_params_t * params)
+{
+    bitcask_keydir * keydir = NULL;
+
+    if (gkd && name)
+    {
+        enif_mutex_lock(gkd->global_keydirs_lock);
+
+        bitcask_keydir* keydir;
+        khiter_t itr = kh_get(global_keydirs, gkd->global_keydirs, name);
+        if (itr != kh_end(gkd->global_keydirs))
+        {
+            keydir = kh_val(gkd->global_keydirs, itr);
+        }
+        enif_mutex_unlock(gkd->global_keydirs_lock);
+    }
+
+    if (!keydir && params)
+    {
+        keydir = calloc(1, sizeof(bitcask_keydir));
+        keydir_init(keydir, name, params);
+
+        if (gkd)
+        {
+        }
+    }
+
+    return keydir;
 }
 
 static void init_fstats_entry(bitcask_fstats_entry * entry, int file_id)
@@ -323,6 +355,11 @@ void keydir_add_file(bitcask_keydir * keydir, uint32_t file_id)
         int itr_status;
         khiter_t itr = kh_put(fstats, keydir->fstats, file_id, &itr_status);
         init_fstats_entry(&kh_val(keydir->fstats, itr), file_id);
+
+        if (file_id > keydir->biggest_file_id)
+        {
+            keydir->biggest_file_id = file_id;
+        }
     }
 
     enif_mutex_unlock(keydir->mutex);
@@ -1747,10 +1784,53 @@ void add_free_page(bitcask_keydir * keydir, uint32_t page_idx)
     }
 }
 
-void free_keydir(bitcask_keydir* keydir)
+void keydir_release(bitcask_keydir* keydir)
 {
-    keydir_free_memory(keydir);
-    free(keydir);
+    int should_delete = 0;
+
+    if (keydir->global_data)
+    {
+        global_keydir_data * gkd = keydir->global_data;
+
+        enif_mutex_lock(gkd->global_keydirs_lock);
+        enif_mutex_lock(keydir->mutex);
+        keydir->refcount--;
+
+        if (keydir->refcount == 0)
+        {
+            // Remember biggest_file_id in case someone re-opens the same name
+            uint32_t global_biggest = 0, the_biggest = 0;
+            khiter_t itr_biggest_file_id = kh_get(global_biggest_file_id,
+                                                  gkd->global_biggest_file_id,
+                                                  keydir->name);
+
+            if (itr_biggest_file_id != kh_end(gkd->global_biggest_file_id))
+            {
+                global_biggest = kh_val(gkd->global_biggest_file_id,
+                                        itr_biggest_file_id);
+            }
+            the_biggest = (global_biggest > keydir->biggest_file_id) ? \
+                          global_biggest : keydir->biggest_file_id;
+            kh_put2(global_biggest_file_id, gkd->global_biggest_file_id,
+                    strdup(keydir->name), the_biggest);
+
+            // This is the last reference to the named keydir. As such,
+            // remove it from the hashtable so no one else tries to use it
+            khiter_t itr = kh_get(global_keydirs, gkd->global_keydirs,
+                                  keydir->name);
+            kh_del(global_keydirs, gkd->global_keydirs, itr);
+            should_delete = 1;
+        }
+        enif_mutex_lock(keydir->mutex);
+
+        enif_mutex_unlock(gkd->global_keydirs_lock);
+    }
+
+    if (should_delete)
+    {
+        keydir_free_memory(keydir);
+        free(keydir);
+    }
 }
 
 #define INITIAL_ITER_ARRAY_SIZE 16
@@ -1901,14 +1981,12 @@ void keydir_itr_release(keydir_itr_t * itr)
             }
         }
 
-        if (--keydir->refcount == 0)
-        {
-            free_keydir(keydir);
-        }
-
-        free(itr->visited_offsets);
         enif_mutex_unlock(keydir->mutex);
+
+        keydir_release(keydir);
         keydir = NULL;
+        free(itr->visited_offsets);
+        itr->visited_offsets = NULL;
     }
 }
 

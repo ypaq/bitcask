@@ -23,7 +23,7 @@
 
 -export([init/0,
          keydir_new/0, keydir_new/1,
-         maybe_keydir_new/1,
+         get_keydir/1,
          keydir_mark_ready/1,
          keydir_put/6,
          keydir_put/8,
@@ -125,10 +125,10 @@ keydir_new() ->
 keydir_new(Name) when is_list(Name) ->
     erlang:nif_error({error, not_loaded}).
 
--spec maybe_keydir_new(string()) ->
+-spec get_keydir(string()) ->
         {ready, reference()} |
         {error, not_ready}.
-maybe_keydir_new(Name) when is_list(Name) ->
+get_keydir(Name) when is_list(Name) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_mark_ready(reference()) ->

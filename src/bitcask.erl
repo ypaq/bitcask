@@ -584,7 +584,7 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
 
     %% Get the live keydir
     {LiveKeyDir, InFiles1} =
-        case bitcask_nifs:maybe_keydir_new(Dirname) of
+        case bitcask_nifs:get_keydir(Dirname) of
             {ready, LKD} ->
                 %% Simplest case; a key dir is already available and
                 %% loaded. Go ahead and open just the files we wish to

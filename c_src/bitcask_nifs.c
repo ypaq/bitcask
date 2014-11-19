@@ -153,16 +153,6 @@ typedef struct
     char  filename[0];
 } bitcask_lock_handle;
 
-KHASH_INIT(global_biggest_file_id, char*, uint32_t, 1, kh_str_hash_func, kh_str_hash_equal);
-KHASH_INIT(global_keydirs, char*, bitcask_keydir*, 1, kh_str_hash_func, kh_str_hash_equal);
-
-typedef struct
-{
-    khash_t(global_biggest_file_id)* global_biggest_file_id;
-    khash_t(global_keydirs)* global_keydirs;
-    ErlNifMutex*             global_keydirs_lock;
-} bitcask_priv_data;
-
 #define kh_put2(name, h, k, v) {                        \
         int itr_status;                                 \
         khiter_t itr = kh_put(name, h, k, &itr_status); \
@@ -203,7 +193,7 @@ static ERL_NIF_TERM ATOM_BOF;
 // Prototypes
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
-ERL_NIF_TERM bitcask_nifs_maybe_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
+ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_keydir_mark_ready(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
 ERL_NIF_TERM bitcask_nifs_keydir_get_epoch(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]);
@@ -244,7 +234,6 @@ ERL_NIF_TERM errno_atom(ErlNifEnv* env, int error);
 ERL_NIF_TERM errno_error_tuple(ErlNifEnv* env, ERL_NIF_TERM key, int error);
 
 static void lock_release(bitcask_lock_handle* handle);
-static bitcask_keydir * create_keydir(const char * name, const char * dir);
 
 static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg);
 static void bitcask_nifs_iterator_resource_cleanup(ErlNifEnv* env, void* arg);
@@ -257,7 +246,7 @@ static ErlNifFunc nif_funcs[] =
 #endif
     {"keydir_new", 0, bitcask_nifs_keydir_new0},
     {"keydir_new", 1, bitcask_nifs_keydir_new1},
-    {"maybe_keydir_new", 1, bitcask_nifs_maybe_keydir_new1},
+    {"get_keydir", 1, bitcask_nifs_get_keydir},
     {"keydir_mark_ready", 1, bitcask_nifs_keydir_mark_ready},
     {"keydir_put_int", 8, bitcask_nifs_keydir_put_int},
     {"keydir_get_int", 3, bitcask_nifs_keydir_get_int},
@@ -293,74 +282,53 @@ static ErlNifFunc nif_funcs[] =
     {"update_fstats", 7, bitcask_nifs_update_fstats}
 };
 
-static bitcask_keydir * create_keydir(const char * name, const char * dir)
+static bitcask_keydir * create_keydir_helper(global_keydir_data * gkd,
+                                             const char * name,
+                                             const char * dir,
+                                             int should_create)
 {
     int init_result;
-    size_t name_len;
-    keydir_init_params_t keydir_init_params;
+    keydir_init_params_t keydir_init_params, *params_p;
     ErlNifSysInfo sys_info;
 
-    name_len = name ? strlen(name) : 0;
-    bitcask_keydir* keydir = calloc(1, sizeof(bitcask_keydir) + name_len);
-
-    if (name_len)
-    {
-        memcpy(keydir->name, name, name_len);
-    }
-
-    keydir_default_init_params(&keydir_init_params);
-    // Use separate fstats obj per scheduler to maximize concurrency.
-    // TODO: this function is inlined in the VM and not accessible :`(
-    // It would be nice to have a per scheduler fstats entry for concurrency
-    // keydir_init_params.fstats_idx_fun = erts_get_scheduler_id;
     enif_system_info(&sys_info, sizeof(ErlNifSysInfo));
-    keydir_init_params.num_fstats = sys_info.scheduler_threads;
+    keydir_default_init_params(&keydir_init_params);
     keydir_init_params.basedir = dir;
-    init_result = keydir_common_init(keydir, &keydir_init_params);
+    // If made a port, add number of async threads.
+    // If we start using dirty schedulers, add those too.
+    keydir_init_params.num_fstats = sys_info.scheduler_threads;
 
-    if (init_result)
-    {
-        free(keydir);
-        keydir = NULL;
-        errno = init_result;
-    }
-
-    return keydir;
+    params_p = should_create ? &keydir_init_params : NULL;
+    return keydir_acquire(gkd, name, params_p);
 }
 
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
-    // First, setup a resource for our handle
-    bitcask_keydir_handle* handle =
-        enif_alloc_resource_compat(env,
-                                   bitcask_keydir_RESOURCE,
-                                   sizeof(bitcask_keydir_handle));
-
-    memset(handle, '\0', sizeof(bitcask_keydir_handle));
-
-    bitcask_keydir* keydir = create_keydir(NULL, ".");
+    bitcask_keydir_handle* handle;
+    bitcask_keydir* keydir = create_keydir_helper(NULL, NULL, ".");
 
     if (!keydir)
     {
         int error = errno;
-        enif_release_resource_compat(env, handle);
         return enif_make_tuple2(env, ATOM_ERROR, errno_atom(env, error));
     }
 
-    // Assign the keydir to our handle and hand it back
+    handle = enif_alloc_resource_compat(env, bitcask_keydir_RESOURCE,
+                                        sizeof(bitcask_keydir_handle));
+    memset(handle, '\0', sizeof(bitcask_keydir_handle));
     handle->keydir = keydir;
     ERL_NIF_TERM result = enif_make_resource(env, handle);
     enif_release_resource_compat(env, handle);
     return enif_make_tuple2(env, ATOM_OK, result);
 }
 
-ERL_NIF_TERM bitcask_nifs_maybe_keydir_new1(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     char name[4096];
     if (enif_get_string(env, argv[0], name, sizeof(name), ERL_NIF_LATIN1))
     {
         // Get our private stash and check the global hash table for this entry
-        bitcask_priv_data* priv = (bitcask_priv_data*)enif_priv_data(env);
+        global_keydir_data* priv = (global_keydir_data*)enif_priv_data(env);
         
         enif_mutex_lock(priv->global_keydirs_lock);
         khiter_t itr = kh_get(global_keydirs, priv->global_keydirs, name);
@@ -390,7 +358,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc,
     if (enif_get_string(env, argv[0], name, sizeof(name), ERL_NIF_LATIN1) > 0)
     {
         // Get our private stash and check the global hash table for this entry
-        bitcask_priv_data* priv = (bitcask_priv_data*)enif_priv_data(env);
+        global_keydir_data* priv = (global_keydir_data*)enif_priv_data(env);
         enif_mutex_lock(priv->global_keydirs_lock);
 
         bitcask_keydir* keydir;
@@ -415,7 +383,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc,
         }
         else
         {
-            keydir = create_keydir(name, name);
+            keydir = create_keydir_helper(priv, name, name);
 
             if (!keydir)
             {
@@ -1552,63 +1520,12 @@ static void bitcask_nifs_iterator_resource_cleanup(ErlNifEnv* env, void* arg)
 static void bitcask_nifs_keydir_resource_cleanup(ErlNifEnv* env, void* arg)
 {
     bitcask_keydir_handle* handle = (bitcask_keydir_handle*)arg;
-    bitcask_keydir* keydir = handle->keydir;
 
-    // First, check that there is even a keydir available. If keydir_release
-    // was invoked manually, we might have already cleaned up the keydir
-    // and this round of cleanup can noop. Otherwise, clear out the handle's
-    // reference to the keydir so that repeat calls function as expected
-    if (!handle->keydir)
+    if (handle->keydir)
     {
+        keydir_release(handle->keydir);
+        handle->keydir = NULL;
         return;
-    }
-    
-    handle->keydir = 0;
-
-    // If the keydir has a lock, we need to decrement the refcount and
-    // potentially release it
-    if (keydir->mutex)
-    {
-        bitcask_priv_data* priv = (bitcask_priv_data*)enif_priv_data(env);
-        enif_mutex_lock(priv->global_keydirs_lock);
-
-        // Remember biggest_file_id in case someone re-opens the same name
-        uint32_t global_biggest = 0, the_biggest = 0;
-        khiter_t itr_biggest_file_id = kh_get(global_biggest_file_id, priv->global_biggest_file_id, keydir->name);
-        if (itr_biggest_file_id != kh_end(priv->global_biggest_file_id)) {
-            global_biggest = kh_val(priv->global_biggest_file_id, itr_biggest_file_id);
-        }
-        the_biggest = (global_biggest > keydir->biggest_file_id) ? \
-            global_biggest : keydir->biggest_file_id;
-        the_biggest++;
-        kh_put2(global_biggest_file_id, priv->global_biggest_file_id, strdup(keydir->name), the_biggest);
-
-        keydir->refcount--;
-        if (keydir->refcount == 0)
-        {
-            // This is the last reference to the named keydir. As such,
-            // remove it from the hashtable so no one else tries to use it
-            khiter_t itr = kh_get(global_keydirs, priv->global_keydirs, keydir->name);
-            kh_del(global_keydirs, priv->global_keydirs, itr);
-        }
-        else
-        {
-            // At least one other reference; just throw away our keydir pointer
-            // so the check below doesn't release the memory.
-            keydir = 0;
-        }
-
-        // Unlock ASAP. Wanted to avoid holding this mutex while we clean up the
-        // keydir, since it may take a while to walk a large keydir and free each
-        // entry.
-        enif_mutex_unlock(priv->global_keydirs_lock);
-    }
-
-    // If keydir is still defined, it's either privately owned or has a
-    // refcount of 0. Either way, we want to release it.
-    if (keydir)
-    {
-        free_keydir(keydir);
     }
 }
 
@@ -1676,7 +1593,7 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
                                        0);
 
     // Initialize shared keydir hashtable
-    bitcask_priv_data* priv = malloc(sizeof(bitcask_priv_data));
+    global_keydir_data* priv = malloc(sizeof(global_keydir_data));
     priv->global_biggest_file_id = kh_init(global_biggest_file_id);
     priv->global_keydirs = kh_init(global_keydirs);
     priv->global_keydirs_lock = enif_mutex_create("bitcask_global_handles_lock");
