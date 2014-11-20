@@ -123,8 +123,8 @@ KHASH_INIT(global_keydirs, const char*, bitcask_keydir*, 1,
 typedef struct
 {
     khash_t(global_biggest_file_id)* global_biggest_file_id;
-    khash_t(global_keydirs)* global_keydirs;
-    ErlNifMutex*             global_keydirs_lock;
+    khash_t(global_keydirs)* keydirs;
+    ErlNifMutex*             mutex;
 } global_keydir_data;
 
 struct bitcask_keydir_struct
@@ -193,7 +193,8 @@ void keydir_default_init_params(keydir_init_params_t * params);
 
 bitcask_keydir * keydir_acquire(global_keydir_data * global_data,
                                 const char * name,
-                                keydir_init_params_t * params);
+                                keydir_init_params_t * params,
+                                int * created_out);
 
 void keydir_release(bitcask_keydir* keydir);
 

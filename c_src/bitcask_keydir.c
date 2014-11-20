@@ -246,12 +246,14 @@ void keydir_default_init_params(keydir_init_params_t * params)
  */
 static int keydir_init(bitcask_keydir * keydir,
                        const char * name,
+                       global_keydir_data * global_data,
                        keydir_init_params_t * params)
 
 {
     uint32_t i;
 
-    // Avoid unitialized pointers in case we call keydir_free_memory()
+    // Init pointers to NULL so it's safe to call keydir_free_memory() when
+    // only partially initialized.
     keydir->mutex = NULL;
     keydir->swap_grow_mutex = NULL;
     keydir->swap_pages = NULL;
@@ -262,6 +264,10 @@ static int keydir_init(bitcask_keydir * keydir,
     keydir->tmp_fstats = NULL;
     keydir->fstats_array = NULL;
     keydir->fstats = NULL;
+    // Assuming global_data is never freed with keydirs around.
+    // Seems unloading the bitcask_nifs module with bitcask refs around could
+    // be bad, but not sure if that is a problem in practice.
+    keydir->global_data = global_data;
 
     keydir->itr_array.items = NULL;
     keydir->itr_array.count = 0;
@@ -305,33 +311,60 @@ static int keydir_init(bitcask_keydir * keydir,
     return 0; // Sweet success!!
 }
 
+/*
+ * Fetch existing keydir from the global registry or create a new one.
+ * If params is NULL, no new keydir will be created.
+ */
 bitcask_keydir * keydir_acquire(global_keydir_data * gkd,
                                 const char * name,
-                                keydir_init_params_t * params)
+                                keydir_init_params_t * params,
+                                int * created_out)
 {
     bitcask_keydir * keydir = NULL;
+    int use_global = gkd && name;
 
-    if (gkd && name)
+    if (created_out)
     {
-        enif_mutex_lock(gkd->global_keydirs_lock);
-
-        bitcask_keydir* keydir;
-        khiter_t itr = kh_get(global_keydirs, gkd->global_keydirs, name);
-        if (itr != kh_end(gkd->global_keydirs))
-        {
-            keydir = kh_val(gkd->global_keydirs, itr);
-        }
-        enif_mutex_unlock(gkd->global_keydirs_lock);
+        *created_out = 0;
     }
 
+    if (use_global)
+    {
+        enif_mutex_lock(gkd->mutex);
+
+        bitcask_keydir* keydir;
+        khiter_t itr = kh_get(global_keydirs, gkd->keydirs, name);
+
+        if (itr != kh_end(gkd->keydirs))
+        {
+            keydir = kh_val(gkd->keydirs, itr);
+            enif_mutex_lock(keydir->mutex);
+            ++keydir->refcount;
+            enif_mutex_unlock(keydir->mutex);
+        }
+    }
+
+    // If creating it.
     if (!keydir && params)
     {
         keydir = calloc(1, sizeof(bitcask_keydir));
-        keydir_init(keydir, name, params);
+        keydir_init(keydir, name, gkd, params);
+        ++keydir->refcount;
 
-        if (gkd)
+        if (created_out)
         {
+            *created_out = 1;
         }
+
+        if (use_global)
+        {
+            kh_put2(global_keydirs, gkd->keydirs, name, keydir);
+        }
+    }
+
+    if (use_global)
+    {
+        enif_mutex_unlock(gkd->mutex);
     }
 
     return keydir;
@@ -1764,7 +1797,7 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
 /*
  * Adds a memory page to the front of the free list.
  */
-// static when used
+// chang to static when used
 void add_free_page(bitcask_keydir * keydir, uint32_t page_idx)
 {
     mem_page_t * mem_page;
@@ -1786,13 +1819,13 @@ void add_free_page(bitcask_keydir * keydir, uint32_t page_idx)
 
 void keydir_release(bitcask_keydir* keydir)
 {
-    int should_delete = 0;
+    int should_delete = 1;
 
     if (keydir->global_data)
     {
         global_keydir_data * gkd = keydir->global_data;
 
-        enif_mutex_lock(gkd->global_keydirs_lock);
+        enif_mutex_lock(gkd->mutex);
         enif_mutex_lock(keydir->mutex);
         keydir->refcount--;
 
@@ -1816,14 +1849,17 @@ void keydir_release(bitcask_keydir* keydir)
 
             // This is the last reference to the named keydir. As such,
             // remove it from the hashtable so no one else tries to use it
-            khiter_t itr = kh_get(global_keydirs, gkd->global_keydirs,
+            khiter_t itr = kh_get(global_keydirs, gkd->keydirs,
                                   keydir->name);
-            kh_del(global_keydirs, gkd->global_keydirs, itr);
-            should_delete = 1;
+            kh_del(global_keydirs, gkd->keydirs, itr);
         }
-        enif_mutex_lock(keydir->mutex);
+        else
+        {
+            should_delete = 0;
+        }
 
-        enif_mutex_unlock(gkd->global_keydirs_lock);
+        enif_mutex_unlock(keydir->mutex);
+        enif_mutex_unlock(gkd->mutex);
     }
 
     if (should_delete)

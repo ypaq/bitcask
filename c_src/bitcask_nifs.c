@@ -285,27 +285,48 @@ static ErlNifFunc nif_funcs[] =
 static bitcask_keydir * create_keydir_helper(global_keydir_data * gkd,
                                              const char * name,
                                              const char * dir,
-                                             int should_create)
+                                             int * created_out)
 {
-    int init_result;
+    bitcask_keydir * keydir;
     keydir_init_params_t keydir_init_params, *params_p;
     ErlNifSysInfo sys_info;
 
-    enif_system_info(&sys_info, sizeof(ErlNifSysInfo));
-    keydir_default_init_params(&keydir_init_params);
-    keydir_init_params.basedir = dir;
-    // If made a port, add number of async threads.
-    // If we start using dirty schedulers, add those too.
-    keydir_init_params.num_fstats = sys_info.scheduler_threads;
+    if (dir)
+    {
+        enif_system_info(&sys_info, sizeof(ErlNifSysInfo));
+        keydir_default_init_params(&keydir_init_params);
+        keydir_init_params.basedir = dir;
+        // If made a port, add number of async threads.
+        // If we start using dirty schedulers, add those too.
+        keydir_init_params.num_fstats = sys_info.scheduler_threads;
 
-    params_p = should_create ? &keydir_init_params : NULL;
-    return keydir_acquire(gkd, name, params_p);
+        params_p = &keydir_init_params;
+    }
+    else // Not creating, just lookup
+    {
+        params_p = NULL;
+    }
+
+    return keydir = keydir_acquire(gkd, name, params_p, created_out);
+}
+
+ERL_NIF_TERM create_keydir_handle(ErlNifEnv * env, bitcask_keydir * keydir)
+{
+    bitcask_keydir_handle * handle;
+    handle = enif_alloc_resource_compat(env, bitcask_keydir_RESOURCE,
+                                        sizeof(bitcask_keydir_handle));
+    memset(handle, '\0', sizeof(bitcask_keydir_handle));
+    handle->keydir = keydir;
+    ERL_NIF_TERM result = enif_make_resource(env, handle);
+    enif_release_resource_compat(env, handle);
+    return result;
 }
 
 ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
-    bitcask_keydir_handle* handle;
-    bitcask_keydir* keydir = create_keydir_helper(NULL, NULL, ".");
+    global_keydir_data* gkd = (global_keydir_data*)enif_priv_data(env);
+    int created;
+    bitcask_keydir* keydir = create_keydir_helper(gkd, NULL, ".", &created);
 
     if (!keydir)
     {
@@ -313,30 +334,32 @@ ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TE
         return enif_make_tuple2(env, ATOM_ERROR, errno_atom(env, error));
     }
 
-    handle = enif_alloc_resource_compat(env, bitcask_keydir_RESOURCE,
-                                        sizeof(bitcask_keydir_handle));
-    memset(handle, '\0', sizeof(bitcask_keydir_handle));
-    handle->keydir = keydir;
-    ERL_NIF_TERM result = enif_make_resource(env, handle);
-    enif_release_resource_compat(env, handle);
-    return enif_make_tuple2(env, ATOM_OK, result);
+    ERL_NIF_TERM keydir_handle = create_keydir_handle(env, keydir);
+    return enif_make_tuple2(env, ATOM_OK, keydir_handle);
 }
 
 ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     char name[4096];
+
     if (enif_get_string(env, argv[0], name, sizeof(name), ERL_NIF_LATIN1))
     {
-        // Get our private stash and check the global hash table for this entry
-        global_keydir_data* priv = (global_keydir_data*)enif_priv_data(env);
-        
-        enif_mutex_lock(priv->global_keydirs_lock);
-        khiter_t itr = kh_get(global_keydirs, priv->global_keydirs, name);
-        khiter_t table_end = kh_end(priv->global_keydirs); /* get end while lock is held! */
-        enif_mutex_unlock(priv->global_keydirs_lock);
-        if (itr != table_end)
+        global_keydir_data* gkd = (global_keydir_data*)enif_priv_data(env);
+        bitcask_keydir * keydir = create_keydir_helper(gkd, name, NULL, NULL);
+
+        if (keydir)
         {
-            return bitcask_nifs_keydir_new1(env, argc, argv);
+            if (!keydir->is_ready)
+            {
+                keydir_release(keydir);
+                keydir = NULL;
+                return enif_make_tuple2(env, ATOM_ERROR, ATOM_NOT_READY);
+            }
+            else
+            {
+                ERL_NIF_TERM keydir_handle = create_keydir_handle(env, keydir);
+                return enif_make_tuple2(env, ATOM_OK, keydir_handle);
+            }
         } 
         else
         {
@@ -352,78 +375,35 @@ ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc, const ERL_NIF_TER
 ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc,
                                       const ERL_NIF_TERM argv[])
 {
-    char name[4096];
-    bitcask_keydir_handle * handle;
+    char name[1024];
 
     if (enif_get_string(env, argv[0], name, sizeof(name), ERL_NIF_LATIN1) > 0)
     {
         // Get our private stash and check the global hash table for this entry
-        global_keydir_data* priv = (global_keydir_data*)enif_priv_data(env);
-        enif_mutex_lock(priv->global_keydirs_lock);
+        global_keydir_data* gkd = (global_keydir_data*)enif_priv_data(env);
+        int created;
+        bitcask_keydir * keydir = create_keydir_helper(gkd, name, ".",
+                                                       &created);
 
-        bitcask_keydir* keydir;
-        khiter_t itr = kh_get(global_keydirs, priv->global_keydirs, name);
-        if (itr != kh_end(priv->global_keydirs))
+        if (keydir)
         {
-            keydir = kh_val(priv->global_keydirs, itr);
-            // Existing keydir is available. Check the is_ready flag to
-            // determine if the original creator is ready for other processes
-            // to use it.
-            if (!keydir->is_ready)
+            if (!created && !keydir->is_ready)
             {
-                // Notify the caller that while the requested keydir exists,
-                // it's not ready for public usage.
-                enif_mutex_unlock(priv->global_keydirs_lock);
+                keydir_release(keydir);
                 return enif_make_tuple2(env, ATOM_ERROR, ATOM_NOT_READY);
             }
             else
             {
-                keydir->refcount++;
+                ERL_NIF_TERM result = create_keydir_handle(env, keydir);
+                ERL_NIF_TERM is_ready_atom =
+                    keydir->is_ready ? ATOM_READY : ATOM_NOT_READY;
+                return enif_make_tuple2(env, is_ready_atom, result);
             }
-        }
+        } 
         else
         {
-            keydir = create_keydir_helper(priv, name, name);
-
-            if (!keydir)
-            {
-                ERL_NIF_TERM error_code = errno_atom(env, errno);
-                enif_mutex_unlock(priv->global_keydirs_lock);
-                return enif_make_tuple2(env, ATOM_ERROR, error_code);
-            }
-
-            // Finally, register this new keydir in the globals
-            kh_put2(global_keydirs, priv->global_keydirs, keydir->name,
-                    keydir);
-
-            khiter_t itr_biggest_file_id = kh_get(global_biggest_file_id,
-                                                  priv->global_biggest_file_id,
-                                                  name);
-
-            if (itr_biggest_file_id != kh_end(priv->global_biggest_file_id))
-            {
-                uint32_t old_biggest_file_id =
-                    kh_val(priv->global_biggest_file_id, itr_biggest_file_id);
-                keydir->biggest_file_id = old_biggest_file_id;
-            }
+            return enif_make_tuple2(env, ATOM_ERROR, ATOM_NOT_READY);
         }
-
-        enif_mutex_unlock(priv->global_keydirs_lock);
-
-        // Setup a resource for the handle
-        handle = enif_alloc_resource_compat(env,
-                                            bitcask_keydir_RESOURCE,
-                                            sizeof(bitcask_keydir_handle));
-        memset(handle, '\0', sizeof(bitcask_keydir_handle));
-        handle->keydir = keydir;
-        ERL_NIF_TERM result = enif_make_resource(env, handle);
-        enif_release_resource_compat(env, handle);
-
-        // Return to the caller a tuple with the reference and an atom
-        // indicating if the keydir is ready or not.
-        ERL_NIF_TERM is_ready_atom =
-            keydir->is_ready ? ATOM_READY : ATOM_NOT_READY;
-        return enif_make_tuple2(env, is_ready_atom, result);
     }
     else
     {
@@ -431,11 +411,14 @@ ERL_NIF_TERM bitcask_nifs_keydir_new1(ErlNifEnv* env, int argc,
     }
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_mark_ready(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_mark_ready(ErlNifEnv* env,
+                                            int argc,
+                                            const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
 
-    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle))
     {
         bitcask_keydir* keydir = handle->keydir;
         LOCK(keydir);
@@ -450,7 +433,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_mark_ready(ErlNifEnv* env, int argc, const ERL_
 }
 
 // NIF wrapper around update_fstats().
-ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc,
+                                        const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
     uint32_t file_id, tstamp;
@@ -1595,8 +1579,8 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     // Initialize shared keydir hashtable
     global_keydir_data* priv = malloc(sizeof(global_keydir_data));
     priv->global_biggest_file_id = kh_init(global_biggest_file_id);
-    priv->global_keydirs = kh_init(global_keydirs);
-    priv->global_keydirs_lock = enif_mutex_create("bitcask_global_handles_lock");
+    priv->keydirs = kh_init(global_keydirs);
+    priv->mutex = enif_mutex_create("bitcask_global_handles_lock");
     *priv_data = priv;
 
     // Initialize atoms that we use throughout the NIF.
