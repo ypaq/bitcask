@@ -2679,7 +2679,10 @@ slow_folder(Cask) ->
     Owner = receive
                 {owner, O} -> O
             end,
+    ?debugFmt("Slow folder ~p, owner ~p\n", [self(), Owner]),
     SlowCollect = fun(K, V, Acc) ->
+                          ?debugFmt("Process ~p got ~p/~p\n",
+                                    [self(), K, V]),
                           if Acc == [] ->
                                   Owner ! i_have_started_folding,
                                   receive
@@ -2689,15 +2692,18 @@ slow_folder(Cask) ->
                              true ->
                                   ok
                           end,
+                          ?debugFmt("And wait ~p\n", [self()]),
                           receive
                               go -> ok;
                               go_reply -> Owner ! reply, ok
                           end,
+                          ?debugFmt("And go ~p\n", [self()]),
                           [{K, V} | Acc]
                   end,
     B = bitcask:open(Cask),
     L = fold(B, SlowCollect, [], false),
     Owner ! {slow_folder_done, self(), L},
+    ?debugFmt("Slow folder ~p finished\n", [self()]),
     bitcask:close(B).
 
 finish_worker_loop2(Pid) ->
@@ -2758,11 +2764,14 @@ fold_lockstep_body() ->
     os:cmd("rm -rf "++Cask),
     Ref = bitcask:open(Cask, [read_write]),
     try
-        Initial = 1500,  %% has to be large to avoid resize behavior.
+        Initial = 1000,
 
+        KF = fun(N) ->
+                     S = io_lib:format("~4..0b", [N]),
+                     list_to_binary(S)
+             end,
         %% populate the store a little
-        [bitcask:put(Ref, <<X:32>>, <<X>>)
-         || X <- lists:seq(1, Initial)],
+        [bitcask:put(Ref, <<X:32>>, KF(X)) || X <- lists:seq(1, Initial)],
 
         Folders = 5,
         Me = self(),
@@ -2773,7 +2782,7 @@ fold_lockstep_body() ->
                     P ! {owner, Me},
                     receive i_have_started_folding -> ok end,
                     P ! go_ahead_with_fold,
-                    [bitcask:put(Ref, <<X:32>>, <<X>>)
+                    [bitcask:put(Ref, <<X:32>>, KF(X))
                      || X <- lists:seq(Initial + 1 + 100*(N-1), Initial + 100*N)],
                     {P, Initial + 100*(N-1)}
                 end
@@ -2784,18 +2793,26 @@ fold_lockstep_body() ->
              [begin
                   case I =< N of
                       true ->
+                          ?debugFmt("Step ~p ~p \n", [P, I]),
                           P ! go_reply,
-                          receive reply -> ok end;
+                          receive
+                              reply -> ok;
+                              {slow_folder_done, P, L} ->
+                                  ?debugFmt("Fold ended early ~p\n~p\n",
+                                                   [P, lists:sort(L)]),
+                                  ?assertEqual(N, length(L))
+                          end,
+                          ?debugFmt("Step ~p ~p done\n", [P, I]);
                       false -> ok
                   end
               end|| {P,N} <- Pids],
-             %%io:format(user, "step~n", []),
              timer:sleep(5)
          end
          || I <- lists:seq(1, Initial + 100 * Folders)],
 
-        %%io:format(user, "collecting output~n", []),
+        ?debugFmt("collecting output~n", []),
         [begin
+             ?debugFmt("Waiting for proc ~p\n", [P]),
              receive
                  {slow_folder_done, P, L} ->
                      ?assertEqual(N, length(L))
@@ -2806,8 +2823,7 @@ fold_lockstep_body() ->
          || {P,N} <- Pids],
         ok
     after
-        ok = bitcask:close(Ref),
-        os:cmd("rm -rf "++Cask)
+        ok = bitcask:close(Ref)
     end.
 
 no_tombstones_after_reopen_test_() ->
@@ -2840,10 +2856,10 @@ no_tombstones_after_reopen_test2(DeleteHintFilesP) ->
 
     B2 = bitcask:open(Dir, [read_write, {max_file_size, MaxFileSize}]),
 
-    Res1 = bitcask:fold(B2, fun(K, _V, Acc0) -> [K|Acc0] end, [], -1, -1, true),
+    Res1 = bitcask:fold(B2, fun(K, _V, Acc0) -> [K|Acc0] end, [], true),
     ?assertNotEqual([], [X || {tombstone, _} = X <- Res1]),
 
-    Res2 = bitcask:fold_keys(B2, fun(K, Acc0) -> [K|Acc0] end, [], -1, -1, true),
+    Res2 = bitcask:fold_keys(B2, fun(K, Acc0) -> [K|Acc0] end, [], true),
     ?assertEqual([], [X || {tombstone, _} = X <- Res2]),
     ok = bitcask:close(B2).
 

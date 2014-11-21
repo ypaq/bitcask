@@ -330,10 +330,10 @@ bitcask_keydir * keydir_acquire(global_keydir_data * gkd,
 
     if (use_global)
     {
+        khiter_t itr;
         enif_mutex_lock(gkd->mutex);
 
-        bitcask_keydir* keydir;
-        khiter_t itr = kh_get(global_keydirs, gkd->keydirs, name);
+        itr = kh_get(global_keydirs, gkd->keydirs, name);
 
         if (itr != kh_end(gkd->keydirs))
         {
@@ -349,7 +349,7 @@ bitcask_keydir * keydir_acquire(global_keydir_data * gkd,
     {
         keydir = calloc(1, sizeof(bitcask_keydir));
         keydir_init(keydir, name, gkd, params);
-        ++keydir->refcount;
+        // Notice that keydirs start with refcount = 1, so no update
 
         if (created_out)
         {
@@ -358,7 +358,7 @@ bitcask_keydir * keydir_acquire(global_keydir_data * gkd,
 
         if (use_global)
         {
-            kh_put2(global_keydirs, gkd->keydirs, name, keydir);
+            kh_put2(global_keydirs, gkd->keydirs, keydir->name, keydir);
         }
     }
 
@@ -1398,8 +1398,9 @@ KeydirGetCode keydir_get(bitcask_keydir *    keydir,
 {
     scan_iter_t scan_iter;
     scan_for_key(keydir, key, key_size, epoch, &scan_iter);
+    int found = scan_iter.found && !scan_is_tombstone(&scan_iter);
 
-    if (scan_iter.found)
+    if (found)
     {
         scan_iter_to_entry(&scan_iter, return_entry);
     }
@@ -1407,7 +1408,7 @@ KeydirGetCode keydir_get(bitcask_keydir *    keydir,
     free_scan_iter(&scan_iter);
     // The free operation only frees allocated memory and releases locks.
     // It is safe to check the found flag afterwards.
-    return scan_iter.found ? KEYDIR_GET_FOUND : KEYDIR_GET_NOT_FOUND;
+    return found ? KEYDIR_GET_FOUND : KEYDIR_GET_NOT_FOUND;
 }
 
 /**
@@ -1821,7 +1822,7 @@ void keydir_release(bitcask_keydir* keydir)
 {
     int should_delete = 1;
 
-    if (keydir->global_data)
+    if (keydir->global_data && keydir->name)
     {
         global_keydir_data * gkd = keydir->global_data;
 
@@ -2055,6 +2056,7 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
         insert_in_page = 0;
     }
 
+    // Per page loop
     while (1)
     {
         init_scan_iterator(&scan_iter, keydir, itr->page_idx);
@@ -2100,7 +2102,7 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
 
                 if (scan_iter.offset >= base_page->size)
                 {
-                    break; // Restart on next page.
+                    break;
                 }
 
                 entry->key_size = scan_get_key_size(&scan_iter);
@@ -2109,7 +2111,6 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
             itr->offset = scan_iter.offset;
             if (itr->offset >= base_page->size)
             {
-                // move to next page
                 itr_array_delete(&base_page->itr_array, itr);
                 free_scan_iter(&scan_iter);
 
@@ -2119,13 +2120,13 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
                 }
 
                 itr->offset = 0;
-                continue;
+                break; // move to next page
             }
 
             scan_to_epoch(keydir, &scan_iter, itr->epoch);
             itr->offset += entry_size_for_key(entry->key_size);
 
-            if (scan_iter.found)
+            if (scan_iter.found && !scan_is_tombstone(&scan_iter))
             {
                 scan_iter_to_entry(&scan_iter, entry);
                 entry->key_size = scan_get_key_size(&scan_iter);

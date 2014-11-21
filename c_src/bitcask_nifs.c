@@ -358,7 +358,7 @@ ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc, const ERL_NIF_TER
             else
             {
                 ERL_NIF_TERM keydir_handle = create_keydir_handle(env, keydir);
-                return enif_make_tuple2(env, ATOM_OK, keydir_handle);
+                return enif_make_tuple2(env, ATOM_READY, keydir_handle);
             }
         } 
         else
@@ -548,7 +548,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
 
         ret_code = keydir_get(keydir, key.data, key.size, epoch, &entry);
 
-        if (ret_code == KEYDIR_GET_FOUND && !is_tombstone_entry(&entry))
+        if (ret_code == KEYDIR_GET_FOUND)
         {
             ERL_NIF_TERM result;
             result = enif_make_tuple6(env,
