@@ -124,7 +124,7 @@ needs_merge_wrapper(H) ->
 
 check_no_tombstones(Ref, Good) ->
     Res = bitcask:fold_keys(Ref, fun(K, Acc0) -> [K|Acc0] end,
-                            [], -1, -1, true),
+                            [], true),
     case [X || {tombstone, _} = X <- Res] of
         [] ->
             Good;
