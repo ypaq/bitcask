@@ -35,100 +35,17 @@
 #include "erl_nif_util.h"
 #include "bitcask_atomic.h"
 #include "bitcask_keydir.h"
+#include "bitcask_debug.h"
 
 #include "khash.h"
 #include "murmurhash.h"
 
-#include <stdio.h>
 
 //typesystem hack to avoid some incorrect errors.
 typedef ErlNifUInt64 uint64;
 
-#ifdef BITCASK_DEBUG
-#include <stdarg.h>
-#include <ctype.h>
-#include <string.h>
-void DEBUG(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-}
-int erts_snprintf(char *, size_t, const char *, ...); 
-#define MAX_DEBUG_STR 128
-#define DEBUG_STR(N, V) \
-    char N[MAX_DEBUG_STR];\
-    erts_snprintf(N, MAX_DEBUG_STR, "%s", V)
-
-#define DEBUG_BIN(N, V, S) \
-    char N[MAX_DEBUG_STR];\
-    format_bin(N, MAX_DEBUG_STR, (unsigned char*)V, (size_t)S)
-
-#define DEBUG2 DEBUG
-#else
-void DEBUG2(const char *fmt, ...) { }
-#define DEBUG_STR(A, B)
-#define DEBUG_BIN(N, V, S)
-#  define DEBUG(X, ...) {}
-#endif
-
-#if defined(BITCASK_DEBUG) && defined(BITCASK_DEBUG_KEYDIR)
-#  define DEBUG_KEYDIR(KD) print_keydir((KD))
-#  define DEBUG_ENTRY(E) print_entry((E))
-#else
-#  define DEBUG_KEYDIR(X) {}
-#  define DEBUG_ENTRY(E) {}
-#endif
-
 #ifdef PULSE
 #include "pulse_c_send.h"
-#endif
-
-#ifdef BITCASK_DEBUG
-void format_bin(char * buf, size_t buf_size, const unsigned char * bin, size_t bin_size)
-{
-    char cbuf[4]; // up to 3 digits + \0
-    int is_printable = 1;
-    int i, n;
-    size_t av_size = buf_size;
-
-    for (i=0;i<bin_size;++i)
-    {
-        if (!isprint(bin[i]))
-        {
-            is_printable = 0;
-            break;
-        }
-    }
-
-    buf[0] = '\0';
-
-    // TODO: Protect against overriding that buffer yo!
-    if (is_printable)
-    {
-        strcat(buf, "<<\"");
-        av_size -= 3;
-        n = av_size < bin_size ? av_size : bin_size;
-        strncat(buf, (char*)bin, n);
-        strcat(buf, "\">>");
-    }
-    else
-    {
-        strcat(buf, "<<");
-        for (i=0;i<bin_size;++i)
-        {
-            if (i>0)
-            {
-                strcat(buf, ",");
-            }
-            sprintf(cbuf, "%u", bin[i]);
-            strcat(buf, cbuf);
-        }
-        strcat(buf, ">>");
-    }
-
-}
 #endif
 
 static ErlNifResourceType* bitcask_keydir_RESOURCE;
@@ -322,7 +239,8 @@ ERL_NIF_TERM create_keydir_handle(ErlNifEnv * env, bitcask_keydir * keydir)
     return result;
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc,
+                                      const ERL_NIF_TERM argv[])
 {
     global_keydir_data* gkd = (global_keydir_data*)enif_priv_data(env);
     int created;
@@ -338,7 +256,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_new0(ErlNifEnv* env, int argc, const ERL_NIF_TE
     return enif_make_tuple2(env, ATOM_OK, keydir_handle);
 }
 
-ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_get_keydir(ErlNifEnv* env, int argc,
+                                     const ERL_NIF_TERM argv[])
 {
     char name[4096];
 
@@ -466,12 +385,6 @@ ERL_NIF_TERM bitcask_nifs_update_fstats(ErlNifEnv* env, int argc,
     }
 }
 
-#ifdef BITCASK_DEBUG
-void print_keydir(bitcask_keydir* keydir)
-{
-}
-#endif
-
 ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env,
                                          int argc,
                                          const ERL_NIF_TERM argv[])
@@ -497,15 +410,13 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env,
         entry.key = key.data;
         entry.key_size = key.size;
 
-        DEBUG2("LINE %d put\r\n", __LINE__);
-
-        DEBUG_BIN(dbgKey, key.data, key.size);
-        DEBUG("+++ Put key = %s file_id=%d offset=%d total_sz=%d tstamp=%u old_file_id=%d\r\n",
-                dbgKey,
-              (int) entry.file_id, (int) entry.offset,
-              (int)entry.total_sz, (unsigned) entry.tstamp, (int)old_file_id);
-        DEBUG_KEYDIR(keydir);
-
+        BC_DEBUG2("LINE %d put\r\n", __LINE__);
+        BC_DEBUG_BIN(dbgKey, key.data, key.size);
+        BC_DEBUG("+++ Put key = %s file_id=%d offset=%d total_sz=%d tstamp=%u "
+                 "old_file_id=%d\r\n", dbgKey, (int) entry.file_id,
+                 (int) entry.offset, (int)entry.total_sz,
+                 (unsigned) entry.tstamp, (int)old_file_id);
+        BC_DEBUG_KEYDIR(keydir);
 
         ret_code = keydir_put(keydir, &entry, old_file_id, old_offset);
 
@@ -527,9 +438,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_put_int(ErlNifEnv* env,
     }
 }
 
-/* int erts_printf(const char *, ...); */
-
-ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc,
+                                         const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
     ErlNifBinary key;
@@ -537,14 +447,15 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
     KeydirGetCode ret_code;
     uint64 epoch; //intentionally odd type to get around warnings
 
-    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle) &&
-        enif_inspect_binary(env, argv[1], &key) &&
-        enif_get_uint64(env, argv[2], &epoch))
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle)
+        && enif_inspect_binary(env, argv[1], &key)
+        && enif_get_uint64(env, argv[2], &epoch))
     {
         bitcask_keydir* keydir = handle->keydir;
 
-        DEBUG_BIN(dbgKey, key.data, key.size);
-        DEBUG("+++ Get %s time = %lu\r\n", dbgKey, epoch);
+        BC_DEBUG_BIN(dbgKey, key.data, key.size);
+        BC_DEBUG("+++ Get %s time = %lu\r\n", dbgKey, epoch);
 
         ret_code = keydir_get(keydir, key.data, key.size, epoch, &entry);
 
@@ -559,7 +470,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
                                       enif_make_uint64_bin(env, entry.offset),
                                       enif_make_uint(env, entry.timestamp));
 
-            DEBUG(" ... returned value file id=%u size=%u ofs=%u tstamp=%u"
+            BC_DEBUG(" ... returned value file id=%u size=%u ofs=%u tstamp=%u"
                   " tomb=%u\r\n", entry.file_id, entry.total_size,
                   entry.offset, entry.timestamp, (unsigned)entry.is_tombstone);
 
@@ -567,7 +478,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
         }
         else
         {
-            DEBUG(" ... not_found\r\n");
+            BC_DEBUG(" ... not_found\r\n");
             return ATOM_NOT_FOUND;
         }
     }
@@ -577,11 +488,13 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_int(ErlNifEnv* env, int argc, const ERL_NIF
     }
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_get_epoch(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_get_epoch(ErlNifEnv* env, int argc,
+                                           const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
 
-    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle))
     {
         uint64 epoch = handle->keydir->epoch;
         return enif_make_uint64(env, epoch);
@@ -592,7 +505,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_get_epoch(ErlNifEnv* env, int argc, const ERL_N
     }
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc,
+                                        const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
     KeydirPutCode ret_code;
@@ -604,7 +518,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_
     // offset matches the one provided. A sort of poor-man's CAS.
     int is_conditional = argc == 4;
     int common_args_ok =
-        enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle) &&
+        enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle) &&
         enif_inspect_binary(env, argv[1], &key);
     int other_args_ok;
    
@@ -626,8 +541,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_remove(ErlNifEnv* env, int argc, const ERL_NIF_
     {
         bitcask_keydir* keydir = handle->keydir;
 
-        DEBUG("+++ Remove %s\r\n", is_conditional ? "conditional" : "");
-        DEBUG_KEYDIR(keydir);
+        BC_DEBUG("+++ Remove %s\r\n", is_conditional ? "conditional" : "");
+        BC_DEBUG_KEYDIR(keydir);
 
         ret_code = keydir_remove(keydir, key.data, key.size, file_id, offset);
 
@@ -695,7 +610,8 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr(ErlNifEnv* env, int argc,
     }
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc,
+                                          const ERL_NIF_TERM argv[])
 {
     bitcask_iterator_handle* itr_handle;
 
@@ -706,7 +622,7 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_next(ErlNifEnv* env, int argc, const ERL_NI
         ErlNifBinary key_binary;
         KeydirItrCode ret;
 
-        DEBUG("+++ itr next\r\n");
+        BC_DEBUG("+++ itr next\r\n");
         enif_mutex_lock(itr_handle->mutex);
 
         if (!itr_handle->itr)
@@ -768,7 +684,8 @@ static void iterator_cleanup_internal(bitcask_iterator_handle * itr_handle)
     enif_mutex_unlock(itr_handle->mutex);
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_itr_release(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_itr_release(ErlNifEnv* env, int argc,
+                                             const ERL_NIF_TERM argv[])
 {
     bitcask_iterator_handle * itr_handle;
 
@@ -784,11 +701,13 @@ ERL_NIF_TERM bitcask_nifs_keydir_itr_release(ErlNifEnv* env, int argc, const ERL
     }
 }
 
-ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+ERL_NIF_TERM bitcask_nifs_keydir_info(ErlNifEnv* env, int argc,
+                                      const ERL_NIF_TERM argv[])
 {
     bitcask_keydir_handle* handle;
 
-    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE, (void**)&handle))
+    if (enif_get_resource(env, argv[0], bitcask_keydir_RESOURCE,
+                          (void**)&handle))
     {
         bitcask_keydir* keydir = handle->keydir;
 
@@ -1527,28 +1446,6 @@ static void bitcask_nifs_file_resource_cleanup(ErlNifEnv* env, void* arg)
         close(handle->fd);
     }
 }
-
-
-#ifdef BITCASK_DEBUG
-void dump_fstats(bitcask_keydir* keydir)
-{
-    bitcask_fstats_entry* curr_f;
-    khiter_t itr;
-    for (itr = kh_begin(keydir->fstats); itr != kh_end(keydir->fstats); ++itr)
-    {
-        if (kh_exist(keydir->fstats, itr))
-        {
-            curr_f = kh_val(keydir->fstats, itr);
-            DEBUG("fstats %d live=(%d,%d) total=(%d,%d)\r\n",
-                    (int) curr_f->file_id,
-                    (int) curr_f->live_keys,
-                    (int) curr_f->live_bytes,
-                    (int) curr_f->total_keys,
-                    (int) curr_f->total_bytes);
-        }
-    }
-}
-#endif
 
 static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {

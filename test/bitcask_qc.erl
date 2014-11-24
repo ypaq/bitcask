@@ -75,7 +75,7 @@ apply_kv_ops([{delete, K, _} | Rest], Ref, Itrs, KVs0, Fstats0) ->
     end;
 apply_kv_ops([{itr, _K, _} | Rest], Ref, Itrs, KVs, Fstats) ->
     %% Don't care about result, just want to intermix with get/put
-    Itr = bitcask_nifs:keydir_itr(get_keydir(Ref)),
+    {ok, Itr} = bitcask_nifs:keydir_itr(get_keydir(Ref)),
     apply_kv_ops(Rest, Ref, [Itr|Itrs], KVs, Fstats);
 apply_kv_ops([{itr_next, _K, _} | _]=Ops, Ref, [], KVs, Fstats) ->
     apply_kv_ops([{itr, k, v}|Ops], Ref, [], KVs, Fstats);

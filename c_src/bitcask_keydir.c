@@ -20,6 +20,8 @@
 
 #include "bitcask_keydir.h"
 #include "bitcask_atomic.h"
+//#define BITCASK_DEBUG
+#include "bitcask_debug.h"
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -1024,7 +1026,6 @@ static void allocate_page(bitcask_keydir * keydir,
     // TODO: Pick from underutilized pages first if none free
     else
     {
-        page_info->mem_page = NULL;
         page_info->page = allocate_swap_page(keydir, &page_info->page_idx);
     }
 }
@@ -1041,6 +1042,7 @@ static int extend_iter_chain(bitcask_keydir * keydir,
 {
     uint32_t next;
     page_t * page;
+    page_info_t * new_page;
     mem_page_t * mem_page;
 
     while(n)
@@ -1066,11 +1068,11 @@ static int extend_iter_chain(bitcask_keydir * keydir,
         }
 
         enif_mutex_lock(page->mutex);
-
         scan_expand_page_array(iter);
-
-        iter->pages[iter->num_pages].page = page;
-        iter->pages[iter->num_pages].mem_page = mem_page;
+        new_page = iter->pages + iter->num_pages;
+        new_page->page = page;
+        new_page->mem_page = mem_page;
+        new_page->page_idx = next;
         ++iter->num_pages;
         --n;
     }
@@ -1083,7 +1085,7 @@ static int extend_iter_chain(bitcask_keydir * keydir,
             return ENOMEM;
         }
 
-        page_info_t * new_page = iter->pages + iter->num_pages;
+        new_page = iter->pages + iter->num_pages;
         allocate_page(keydir, iter, new_page);
 
         if (!new_page->page)
@@ -1184,22 +1186,32 @@ static int scan_keys_equal(const uint8_t * key,
                            uint32_t key_size,
                            scan_iter_t * iter)
 {
-    uint32_t offset = iter->offset + ENTRY_KEY_OFFSET;
-    uint32_t page_offset = offset % PAGE_SIZE;
-    uint32_t page_idx = offset / PAGE_SIZE;
-    uint32_t remaining = key_size;
-    int len = PAGE_SIZE - page_offset; // potentially rest of first page
-    uint8_t * entry_key = iter->pages[page_idx].page->data + page_offset;
+    uint32_t iter_key_size = scan_get_key_size(iter);
+    uint32_t offset, page_offset, page_idx, remaining, len;
+    uint8_t * entry_key;
+    
+    if (iter_key_size != key_size)
+    {
+        return 0;
+    }
+
+    offset = iter->offset + ENTRY_KEY_OFFSET;
+    page_offset = offset % PAGE_SIZE;
+    page_idx = offset / PAGE_SIZE;
+    remaining = key_size;
+    len = PAGE_SIZE - page_offset; // potentially rest of first page
+    entry_key = iter->pages[page_idx].page->data + page_offset;
 
     if (len > remaining)
     {
         len = remaining;
     }
 
-    if (strncmp((char*)key, (const char*)entry_key, len) != 0)
+    if (memcmp(key, entry_key, len) != 0)
     {
         return 0;
     }
+
     remaining -= len;
 
     len = PAGE_SIZE;
@@ -1214,7 +1226,7 @@ static int scan_keys_equal(const uint8_t * key,
             len = remaining;
         }
 
-        if (strncmp((char*)key, (const char *)entry_key, len) != 0)
+        if (memcmp(key, entry_key, len) != 0)
         {
             return 0;
         }
@@ -1223,7 +1235,7 @@ static int scan_keys_equal(const uint8_t * key,
     }
 
     // keys match
-    return 1;
+    return remaining == 0;
 }
 
 /*
@@ -1507,7 +1519,7 @@ static WritePrepCode write_prep(bitcask_keydir *   keydir,
                                 uint32_t           key_size)
 {
     mem_page_t * base_page = iter->pages[0].mem_page;
-    uint32_t wanted_size = iter->offset + entry_size_for_key(key_size);
+    uint32_t wanted_size = base_page->size + entry_size_for_key(key_size);
     uint32_t wanted_pages = (wanted_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     // If size overflow (> 4G) give up on life!
@@ -1537,35 +1549,55 @@ static WritePrepCode write_prep(bitcask_keydir *   keydir,
         return WRITE_PREP_NO_MEM;
     }
 
-    base_page->size = wanted_size;
     return WRITE_PREP_OK;
 }
 
 static void append_entry(scan_iter_t * iter, keydir_entry_t * entry)
 {
+    page_info_t * base_page = &iter->pages[0];
+
+    BC_DEBUG_BIN(dbg_key, entry->key, entry->key_size);
+    BC_DEBUG("Append entry %s to page %u at position %u\r\n", dbg_key,
+             base_page->page_idx, base_page->mem_page->size);
+
+    iter->offset = base_page->mem_page->size;
     scan_set_file_id(iter, entry->file_id);
     scan_set_total_size(iter, entry->total_size);
     scan_set_epoch(iter, entry->epoch);
     scan_set_offset(iter, entry->offset);
     scan_set_timestamp(iter, entry->timestamp);
-    scan_set_next(iter, entry->next);
+    scan_set_next(iter, 0);
     scan_set_key_size(iter, entry->key_size);
     scan_set_key(iter, entry->key, entry->key_size);
+    base_page->mem_page->size += entry_size_for_key(entry->key_size);
 }
 
 static void append_version(scan_iter_t * iter, keydir_entry_t * entry)
 {
+    page_info_t * base_page = &iter->pages[0];
+
+    BC_DEBUG_BIN(dbg_key, entry->key, entry->key_size);
+    BC_DEBUG("Append version %s to page %u at position %u\r\n", dbg_key,
+             base_page->page_idx, base_page->mem_page->size);
+
+    iter->offset = base_page->mem_page->size;
     scan_set_file_id(iter, entry->file_id);
     scan_set_offset(iter, entry->offset);
     scan_set_total_size(iter, entry->total_size);
     scan_set_timestamp(iter, entry->timestamp);
     scan_set_epoch(iter, entry->epoch);
+    scan_set_next(iter, 0);
     // Key only in first version, not here.
     scan_set_key_size(iter, 0);
+    base_page->mem_page->size += BASE_ENTRY_SIZE;
 }
 
 static void update_entry(scan_iter_t * iter, keydir_entry_t * entry)
 {
+    BC_DEBUG_BIN(dbg_key, entry->key, entry->key_size);
+    BC_DEBUG("Update %s in page %u at position %u\r\n", dbg_key,
+             iter->pages[0].page_idx, iter->offset);
+
     scan_set_file_id(iter, entry->file_id);
     scan_set_offset(iter, entry->offset);
     scan_set_total_size(iter, entry->total_size);
@@ -1637,7 +1669,6 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
                     case WRITE_PREP_OK:
                         // Point previous version to new one.
                         chain_size = iter.pages[0].mem_page->size;
-                        iter.offset = chain_size;
                         scan_set_next(&iter, chain_size);
                         append_version(&iter, entry);
                         added = 1;
@@ -1683,6 +1714,7 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
         else
         {
             bc_atomic_add_64(&keydir->key_count, 1);
+            bc_atomic_add_64(&keydir->key_bytes, (int64_t)entry->key_size);
         }
 
         update_fstats(fstats_handle->fstats, NULL /* don't lock */,
@@ -1691,8 +1723,6 @@ KeydirPutCode keydir_put(bitcask_keydir * keydir,
                       (int32_t)entry->total_size ); 
         enif_mutex_unlock(fstats_handle->mutex);
 
-        bc_atomic_add_64(&keydir->key_bytes,
-                         (int32_t)entry->total_size - found_size);
     }
 
     return ret_code;
@@ -1705,6 +1735,7 @@ static void append_deleted_version(scan_iter_t * iter, uint64_t epoch)
     scan_set_total_size(iter, 0);
     scan_set_timestamp(iter, 0);
     scan_set_epoch(iter, epoch);
+    scan_set_next(iter, 0);
     scan_set_key_size(iter, 0);
 }
 
@@ -1761,11 +1792,8 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
                         // Point previous version to extra version.
                         chain_size = iter.pages[0].mem_page->size;
                         scan_set_next(&iter, chain_size);
-                        iter.offset = chain_size;
                         found_size = scan_get_total_size(&iter);
-                        update_fstats(fstats_handle->fstats,
-                                      fstats_handle->mutex,
-                                      found_file_id, 0, -1, 0, -found_size, 0);
+                        iter.offset = chain_size;
                         append_deleted_version(&iter, epoch);
                         break;
                     default:
@@ -1789,7 +1817,7 @@ KeydirPutCode keydir_remove(bitcask_keydir * keydir,
         update_fstats(fstats_handle->fstats, fstats_handle->mutex,
                       found_file_id, 0, -1, 0, -found_size, 0);
         bc_atomic_add_64(&keydir->key_count, -1);
-        bc_atomic_add_64(&keydir->key_bytes, (int64_t)found_size);
+        bc_atomic_add_64(&keydir->key_bytes, -(int64_t)key_size);
     }
 
     return ret_code;
