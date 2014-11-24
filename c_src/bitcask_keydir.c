@@ -2062,6 +2062,7 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
     mem_page_t * base_page;
     bitcask_keydir * keydir = itr->keydir;
     int insert_in_page;
+    uint32_t base_offset;
 
     if (!keydir)
     {
@@ -2136,7 +2137,9 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
                 entry->key_size = scan_get_key_size(&scan_iter);
             }
 
-            itr->offset = scan_iter.offset;
+            base_offset = scan_iter.offset;
+            itr->offset = base_offset;
+
             if (itr->offset >= base_page->size)
             {
                 itr_array_delete(&base_page->itr_array, itr);
@@ -2152,11 +2155,19 @@ KeydirItrCode keydir_itr_next(keydir_itr_t * itr,
             }
 
             scan_to_epoch(keydir, &scan_iter, itr->epoch);
+            // Point keydir iterator at following entry.
             itr->offset += entry_size_for_key(entry->key_size);
 
             if (scan_iter.found && !scan_is_tombstone(&scan_iter))
             {
                 scan_iter_to_entry(&scan_iter, entry);
+
+                // If multi-version, go back to base version to get key.
+                if (base_offset != scan_iter.offset)
+                {
+                    scan_iter.offset = base_offset;
+                }
+
                 entry->key_size = scan_get_key_size(&scan_iter);
                 // TODO: Optimize to copy key only once if possible.
                 entry->key = malloc(entry->key_size);
