@@ -138,14 +138,14 @@ keydir_mark_ready(_Ref) ->
 
 -spec keydir_put(reference(), binary(), integer(), integer(),
                  integer(), integer()) ->
-        ok | already_exists.
+        ok | modified.
 keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp) ->
     keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, 0, 0).
 
 -spec keydir_put(Ref::reference(), Key::binary(), FileId::integer(),
                  TotalSz::integer(), Offset::integer(), Tstamp::integer(),
                  OldFileId::integer(), OldOffset::integer()) ->
-        ok | already_exists.
+        ok | modified.
 keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, OldFileId, OldOffset) ->
     keydir_put_int(Ref, Key, FileId, TotalSz, <<Offset:64/unsigned-native>>,
                    Tstamp, OldFileId, <<OldOffset:64/unsigned-native>>).
@@ -153,7 +153,7 @@ keydir_put(Ref, Key, FileId, TotalSz, Offset, Tstamp, OldFileId, OldOffset) ->
 -spec keydir_put_int(Ref::reference(), Key::binary(), FileId::integer(),
                      TotalSz::integer(), Offset::binary(), Tstamp::integer(),
                      OldFileId::integer(), OldOffset::binary()) ->
-        ok | already_exists.
+        ok | modified.
 keydir_put_int(_Ref, _Key, _FileId, _TotalSz, _Offset, _Tstamp,
                _OldFileId, _OldOffset) ->
     erlang:nif_error({error, not_loaded}).
@@ -183,12 +183,12 @@ keydir_get_epoch(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_remove(reference(), binary()) ->
-        ok | already_exists.
+        ok | modified.
 keydir_remove(_Ref, _Key) ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_remove(reference(), binary(), integer(), integer()) ->
-        ok | already_exists.
+        ok | modified.
 keydir_remove(Ref, Key, FileId, Offset) ->
     keydir_remove_int(Ref, Key, FileId, <<Offset:64/unsigned-native>>).
 
@@ -414,18 +414,20 @@ keydir_basic_test_() ->
 
 keydir_basic_test2() ->
     {ok, Ref} = keydir_new(),
-    ok = keydir_put(Ref, <<"abc">>, 0, 1234, 0, 1),
+    FileId = 1,
+    keydir_add_file(Ref, FileId),
+    ok = keydir_put(Ref, <<"abc">>, FileId, 1234, 0, 1),
 
-    {1, 3, [{0, 1, 1, 1234, 1234, 1, 1, _}],
+    {1, 3, [{FileId, 1, 1, 1234, 1234, 1, 1, _}],
      {0, 0, false, _},_} = keydir_info(Ref),
 
     E = keydir_get(Ref, <<"abc">>),
-    0 = E#bitcask_entry.file_id,
+    FileId = E#bitcask_entry.file_id,
     1234 = E#bitcask_entry.total_sz,
     0 = E#bitcask_entry.offset,
     1 = E#bitcask_entry.tstamp,
 
-    already_exists = keydir_put(Ref, <<"abc">>, 0, 1234, 0, 0),
+    modified = keydir_put(Ref, <<"abc">>, FileId, 1234, 0, 0, 2, 0),
 
     ok = keydir_remove(Ref, <<"abc">>),
     not_found = keydir_get(Ref, <<"abc">>).

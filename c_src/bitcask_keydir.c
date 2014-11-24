@@ -1890,6 +1890,12 @@ void keydir_release(bitcask_keydir* keydir)
         enif_mutex_unlock(keydir->mutex);
         enif_mutex_unlock(gkd->mutex);
     }
+    else // Anonymous keydir
+    {
+        enif_mutex_lock(keydir->mutex);
+        should_delete = --keydir->refcount == 0;
+        enif_mutex_unlock(keydir->mutex);
+    }
 
     if (should_delete)
     {

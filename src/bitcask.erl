@@ -238,7 +238,7 @@ get(Ref, Key, TryNum) ->
                                                     E#bitcask_entry.offset) of
                         ok ->
                             not_found;
-                        already_exists ->
+                        modified ->
                             % Updated since last read, try again.
                             get(Ref, Key, TryNum-1)
                     end;
@@ -1489,7 +1489,7 @@ inner_merge_write(K, V, Tstamp, OldFileId, OldOffset, State) ->
                                              OldFileId, OldOffset) of
                     ok ->
                         Outfile;
-                    already_exists ->
+                    modified ->
                         {ok, O} = bitcask_fileops:un_write(Outfile),
                         O
                 end;
@@ -1664,7 +1664,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                 #bitcask_entry{file_id=OldFileId}
                   when OldFileId > WriteFileId ->
                     State3 = wrap_write_file(State2),
-                    do_put(Key, Value, State3, Retries - 1, already_exists);
+                    do_put(Key, Value, State3, Retries - 1, modified);
                     
                 #bitcask_entry{file_id=OldFileId,offset=OldOffset} ->
                     State3 =
@@ -1695,7 +1695,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                     % A merge wrote this key in a file > current write file
                     % Start a new write file > the merge output file
                     State3 = wrap_write_file(State2),
-                    do_put(Key, Value, State3, Retries - 1, already_exists);
+                    do_put(Key, Value, State3, Retries - 1, modified);
                 #bitcask_entry{file_id=OldFileId, offset=OldOffset} ->
                     Tombstone = <<?TOMBSTONE2_STR, OldFileId:32>>,
                     case bitcask_fileops:write(State2#bc_state.write_file,
@@ -1708,7 +1708,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                             case bitcask_nifs:keydir_remove(State2#bc_state.keydir,
                                                             Key, OldFileId,
                                                             OldOffset) of
-                                already_exists ->
+                                modified ->
                                     %% Merge updated the keydir after tombstone
                                     %% write.  beat us, so undo and retry in a
                                     %% new file.
@@ -1718,7 +1718,7 @@ do_put(Key, Value, #bc_state{write_file = WriteFile} = State,
                                                State2#bc_state {
                                                  write_file = WriteFile3 }),
                                     do_put(Key, Value, State3,
-                                           Retries - 1, already_exists);
+                                           Retries - 1, modified);
                                 ok ->
                                     {ok, State2#bc_state { write_file = WriteFile2 }}
                             end;
@@ -1738,7 +1738,7 @@ write_and_keydir_put(State2, Key, Value, Tstamp, Retries, OldFileId, OldOffset) 
                                          OldFileId, OldOffset) of
                 ok ->
                     {ok, State2#bc_state { write_file = WriteFile2 }};
-                already_exists ->
+                modified ->
                     %% Assuming the timestamps in the keydir are
                     %% valid, there is an edge case where the merge thread
                     %% could have rewritten this Key to a file with a greater
@@ -1752,7 +1752,7 @@ write_and_keydir_put(State2, Key, Value, Tstamp, Retries, OldFileId, OldOffset) 
                     {ok, WriteFile3} = bitcask_fileops:un_write(WriteFile2),
                     State3 = wrap_write_file(
                                State2#bc_state { write_file = WriteFile3 }),
-                    do_put(Key, Value, State3, Retries - 1, already_exists)
+                    do_put(Key, Value, State3, Retries - 1, modified)
             end;
         Error2 ->
             throw({unrecoverable, Error2, State2})
@@ -2679,10 +2679,7 @@ slow_folder(Cask) ->
     Owner = receive
                 {owner, O} -> O
             end,
-    ?debugFmt("Slow folder ~p, owner ~p\n", [self(), Owner]),
     SlowCollect = fun(K, V, Acc) ->
-                          ?debugFmt("Process ~p got ~p/~p\n",
-                                    [self(), K, V]),
                           if Acc == [] ->
                                   Owner ! i_have_started_folding,
                                   receive
@@ -2692,18 +2689,15 @@ slow_folder(Cask) ->
                              true ->
                                   ok
                           end,
-                          ?debugFmt("And wait ~p\n", [self()]),
                           receive
                               go -> ok;
                               go_reply -> Owner ! reply, ok
                           end,
-                          ?debugFmt("And go ~p\n", [self()]),
                           [{K, V} | Acc]
                   end,
     B = bitcask:open(Cask),
     L = fold(B, SlowCollect, [], false),
     Owner ! {slow_folder_done, self(), L},
-    ?debugFmt("Slow folder ~p finished\n", [self()]),
     bitcask:close(B).
 
 finish_worker_loop2(Pid) ->
@@ -2793,16 +2787,12 @@ fold_lockstep_body() ->
              [begin
                   case I =< N of
                       true ->
-                          ?debugFmt("Step ~p ~p \n", [P, I]),
                           P ! go_reply,
                           receive
                               reply -> ok;
                               {slow_folder_done, P, L} ->
-                                  ?debugFmt("Fold ended early ~p\n~p\n",
-                                                   [P, lists:sort(L)]),
                                   ?assertEqual(N, length(L))
-                          end,
-                          ?debugFmt("Step ~p ~p done\n", [P, I]);
+                          end;
                       false -> ok
                   end
               end|| {P,N} <- Pids],
@@ -2810,9 +2800,7 @@ fold_lockstep_body() ->
          end
          || I <- lists:seq(1, Initial + 100 * Folders)],
 
-        ?debugFmt("collecting output~n", []),
         [begin
-             ?debugFmt("Waiting for proc ~p\n", [P]),
              receive
                  {slow_folder_done, P, L} ->
                      ?assertEqual(N, length(L))

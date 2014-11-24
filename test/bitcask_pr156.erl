@@ -2,10 +2,8 @@
 
 -include("bitcask.hrl").
 
--ifdef(TEST).
 -compile(export_all).
 -include_lib("eunit/include/eunit.hrl").
--endif.
 
 -define(BITCASK, "/tmp/bc.pr156_regression").
 %% Number of keys used in the tests
