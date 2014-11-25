@@ -508,7 +508,7 @@ subfold(SubFun,[FD | Rest],Acc0) ->
 
 %% @doc Start entry iterator
 -spec iterator(reference()) ->
-      reference() | out_of_date | {error, iteration_in_process}.
+    {ok, reference()} | {error, allocation_error}.
 iterator(Ref) ->
     KeyDir = (get_state(Ref))#bc_state.keydir,
     bitcask_nifs:keydir_itr(KeyDir).

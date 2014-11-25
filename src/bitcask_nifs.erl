@@ -114,14 +114,14 @@ set_pulse_pid(_Pid) ->
 %%
 
 
--spec keydir_new() -> {ok, reference()}.
+-spec keydir_new() -> {ok, reference()} | {error, atom()}.
 keydir_new() ->
     erlang:nif_error({error, not_loaded}).
 
 -spec keydir_new(string()) ->
         {ok, reference()} |
         {ready, reference()} | {not_ready, reference()} |
-        {error, not_ready}.
+        {error, atom()}.
 keydir_new(Name) when is_list(Name) ->
     erlang:nif_error({error, not_loaded}).
 
@@ -260,13 +260,11 @@ keydir_info(_Ref) ->
 keydir_release(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_add_file(reference(), integer()) ->
-        {ok, integer()} | {error, atom()}.
+-spec keydir_add_file(reference(), integer()) -> ok.
 keydir_add_file(_Ref, _FileId) ->
     erlang:nif_error({error, not_loaded}).
 
--spec keydir_remove_file(reference(), integer()) ->
-        {ok, integer()} | {error, atom()}.
+-spec keydir_remove_file(reference(), integer()) -> ok.
 keydir_remove_file(_Ref, _FileId) ->
     erlang:nif_error({error, not_loaded}).
 
