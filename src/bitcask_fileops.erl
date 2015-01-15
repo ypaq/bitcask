@@ -142,8 +142,18 @@ close_for_writing(fresh) -> ok;
 close_for_writing(undefined) -> ok;
 close_for_writing(State = #filestate{ mode = read_write, fd = Fd }) ->
     S2 = close_hintfile(State),
-    bitcask_io:file_sync(Fd),
-    S2#filestate { mode = read_only }.
+    case application:get_env(bitcask, close_on_freeze) of
+        {ok, true} ->
+            close_and_open(S2);
+        _ ->
+            bitcask_io:file_sync(Fd),
+            S2#filestate { mode = read_only }
+    end.
+
+close_and_open(S = #filestate{filename = Filename}) ->
+    ok = close(S),
+    {ok, S2} = open_file(Filename),
+    S2.
 
 close_hintfile(State = #filestate { hintfd = undefined }) ->
     State;
