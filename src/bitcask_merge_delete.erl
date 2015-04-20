@@ -2,7 +2,7 @@
 %%
 %% bitcask: Eric Brewer-inspired key/value store
 %%
-%% Copyright (c) 2012 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2012,2014,2015 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -35,7 +35,9 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
+-include_lib("otp_compat/include/otp_compat.hrl").
 -include("bitcask.hrl").
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -compile(export_all).
@@ -44,13 +46,7 @@
 -define(SERVER, ?MODULE).
 -define(TIMEOUT, 1000).
 
--ifdef(namespaced_types).
--type merge_queue() :: queue:queue().
--else.
--type merge_queue() :: queue().
--endif.
-
--record(state, {q :: merge_queue()}).
+-record(state, {q :: queue_t()}).
 
 %%%===================================================================
 %%% API
@@ -179,12 +175,12 @@ multiple_merges_during_fold_body() ->
     bitcask:merge(Dir),
     PutSome(),
     merge_until(Dir, Count1, CountSetuids),
-    
+
     SlowPid ! go_ahead,
     timer:sleep(500),
     ok = ?MODULE:testonly__delete_trigger(),
     0 = CountSetuids(),
-    
+
     ok.
 
 merge_until(Dir, MinCount, CountSetuids) ->
@@ -196,7 +192,7 @@ merge_until(Dir, MinCount, CountSetuids) ->
             timer:sleep(100),
             merge_until(Dir, MinCount, CountSetuids)
     end.
-    
+
 regression_gh82_test_() ->
     {timeout, 300, ?_assertEqual(ok, regression_gh82_body())}.
 
