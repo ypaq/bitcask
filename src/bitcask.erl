@@ -45,7 +45,7 @@
 -export([has_pending_delete_bit/1]).                    % For EUnit tests
 
 -include_lib("kernel/include/file.hrl").
--include_lib("otp_compat/include/otp_compat.hrl").
+-include_lib("otp_compat/include/ns_types.hrl").
 -include("bitcask.hrl").
 
 
