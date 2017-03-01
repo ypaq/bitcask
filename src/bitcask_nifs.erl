@@ -86,16 +86,17 @@
 -spec init() ->
         ok | {error, any()}.
 init() ->
+    SoName =
     case code:priv_dir(bitcask) of
         {error, bad_name} ->
             case code:which(?MODULE) of
                 Filename when is_list(Filename) ->
-                    SoName = filename:join([filename:dirname(Filename),"../priv", "bitcask"]);
+                    filename:join([filename:dirname(Filename),"../priv", "bitcask"]);
                 _ ->
-                    SoName = filename:join("../priv", "bitcask")
+                    filename:join("../priv", "bitcask")
             end;
          Dir ->
-            SoName = filename:join(Dir, "bitcask")
+            filename:join(Dir, "bitcask")
     end,
     erlang:load_nif(SoName, 0).
 

@@ -600,17 +600,18 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
     KT = get_key_transform(get_opt(key_transform, Opts)),
 
     %% Try to lock for merging
-    case bitcask_lockops:acquire(merge, Dirname) of
-        {ok, Lock} ->
-            ok;
-        {error, Reason} ->
-            Lock = undefined,
-            throw({error, {merge_locked, Reason, Dirname}})
-    end,
+    Lock =
+        case bitcask_lockops:acquire(merge, Dirname) of
+            {ok, Lock0} ->
+                Lock0;
+            {error, Reason} ->
+                throw({error, {merge_locked, Reason, Dirname}})
+        end,
 
     %% Get the live keydir
+    {InFiles1, LiveKeyDir} =
     case bitcask_nifs:maybe_keydir_new(Dirname) of
-        {ready, LiveKeyDir} ->
+        {ready, LiveKeyDir0} ->
             %% Simplest case; a key dir is already available and
             %% loaded. Go ahead and open just the files we wish to
             %% merge
@@ -624,14 +625,13 @@ merge1(Dirname, Opts, FilesToMerge0, ExpiredFiles) ->
                             end
                         end
                         || F <- FilesToMerge0],
-            InFiles1 = [F || F <- InFiles0, F /= skip];
+            {[F || F <- InFiles0, F /= skip], LiveKeyDir0};
         {error, not_ready} ->
             %% Someone else is loading the keydir, or this cask isn't open.
             %% We'll bail here and try again later.
 
             ok = bitcask_lockops:release(Lock),
             % Make erlc happy w/ non-local exit
-            LiveKeyDir = undefined, InFiles1 = [],
             throw({error, not_ready})
     end,
 
@@ -1060,11 +1060,12 @@ summary_info(Ref) ->
 
     %% We want to ignore the file currently being written when
     %% considering status!
+    WritingFileId =
     case bitcask_lockops:read_activefile(write, State#bc_state.dirname) of
         undefined ->
-            WritingFileId = undefined;
+            undefined;
         Filename ->
-            WritingFileId = bitcask_fileops:file_tstamp(Filename)
+            bitcask_fileops:file_tstamp(Filename)
     end,
 
     %% Convert fstats list into a list of #file_status
@@ -1980,16 +1981,17 @@ expiry_merge([File | Files], LiveKeyDir, KT, Acc0) ->
                   end,
                   Acc
         end,
+    Acc =
     case bitcask_fileops:fold_keys(File, Fun, ok, default) of
         {error, Reason} ->
             error_logger:error_msg("Error folding keys for ~p: ~p\n",
                                    [File#filestate.filename,Reason]),
-            Acc = Acc0;
+            Acc0;
         _ ->
             error_logger:info_msg("All keys expired in: ~p scheduling "
                                   "file for deletion\n",
                                   [File#filestate.filename]),
-            Acc = lists:append(Acc0, [File])
+            lists:append(Acc0, [File])
     end,
     expiry_merge(Files, LiveKeyDir, KT, Acc).
 
