@@ -9,6 +9,7 @@
 /_checkouts
 /deps
 /rebar.lock
+/compile_commands.json
 
 # work environments
 *.bak
@@ -35,3 +36,5 @@ tmp/
 /doc/
 /ebin/
 log/
+*.so
+*.o
