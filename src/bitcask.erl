@@ -75,13 +75,13 @@
 %% @type bc_state().
 -record(bc_state, {dirname :: string(),
                    write_file :: 'fresh' | 'undefined' | #filestate{},     % File for writing
-                   write_lock :: reference(),     % Reference to write lock
-                   read_files :: [#filestate{}],     % Files opened for reading
-                   max_file_size :: integer(),  % Max. size of a written file
-                   opts :: list(),           % Original options used to open the bitcask
-                   key_transform :: function(),
+                   write_lock :: 'undefined' | reference(),     % Reference to write lock
+                   read_files :: 'undefined' | [#filestate{}],     % Files opened for reading
+                   max_file_size :: 'undefined' | integer(),  % Max. size of a written file
+                   opts :: 'undefined' | list(),           % Original options used to open the bitcask
+                   key_transform :: 'undefined' | function(),
                    keydir :: reference(),       % Key directory
-                   read_write_p :: integer(),    % integer() avoids atom -> NIF
+                   read_write_p :: 'undefined'| integer(),    % integer() avoids atom -> NIF
                    % What tombstone style to write, for testing purposes only.
                    % 0 = old style without file id, 2 = new style with file id
                    tombstone_version = 2 :: 0 | 2
