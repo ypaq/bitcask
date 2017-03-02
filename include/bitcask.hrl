@@ -11,7 +11,7 @@
                     filename :: string(), % Filename
                     tstamp :: 'undefined' | integer(),   % Tstamp portion of filename
                     fd :: 'undefined' | port(),       % File handle
-                    hintfd :: 'undefined' | port(),   % File handle for hints
+                    hintfd :: port(),   % File handle for hints
                     hintcrc=0 :: integer(),  % CRC-32 of current hint
                     ofs :: 'undefined' | non_neg_integer(), % Current offset for writing
                     l_ofs=0 :: non_neg_integer(),  % Last offset written to data file
