@@ -18,84 +18,118 @@
 #
 # -------------------------------------------------------------------
 #
-# Requires GNU Make functionality and a Unix-y environment.
+# Requires:
+#   - Rebar3 environment variables
+#   - GNU Make functionality
+#   - A Unix-y build environment
 #
+module	:= bitcask
 
-# System type and C compiler/flags.
-
-CURDIR := $(shell pwd)
-BASEDIR := $(abspath $(CURDIR)/..)
-
-PROJECT ?= $(notdir $(BASEDIR))
-PROJECT := $(strip $(PROJECT))
-
-ERTS_INCLUDE_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~s/erts-~s/include/\", [code:root_dir(), erlang:system_info(version)]).")
-ERL_INTERFACE_INCLUDE_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~s\", [code:lib_dir(erl_interface, include)]).")
-ERL_INTERFACE_LIB_DIR ?= $(shell erl -noshell -s init stop -eval "io:format(\"~s\", [code:lib_dir(erl_interface, lib)]).")
-
-C_SRC_DIR = $(CURDIR)
-C_SRC_OUTPUT ?= $(CURDIR)/../priv/$(PROJECT).so
-
-
-UNAME_SYS := $(shell uname -s)
-ifeq ($(UNAME_SYS), Darwin)
-	CC ?= cc
-	CFLAGS ?= -O3 -std=c99 -arch x86_64 -finline-functions -Wall -Wmissing-prototypes
-	CXXFLAGS ?= -O3 -arch x86_64 -finline-functions -Wall
-	LDFLAGS ?= -arch x86_64 -flat_namespace -undefined suppress
-else ifeq ($(UNAME_SYS), FreeBSD)
-	CC ?= cc
-	CFLAGS ?= -O3 -std=c99 -finline-functions -Wall -Wmissing-prototypes
-	CXXFLAGS ?= -O3 -finline-functions -Wall
-else ifeq ($(UNAME_SYS), Linux)
-	CC ?= gcc
-	CFLAGS ?= -O3 -std=c99 -finline-functions -Wall -Wmissing-prototypes
-	CXXFLAGS ?= -O3 -finline-functions -Wall
-else ifeq ($(sys_type), sunos)
-	CFLAGS	+= _REENTRANT
-	CC	?= gcc
-else
-	$(error Unsupported platform '$(sys_type)')
+env_ok	:= true
+ifeq ($(REBAR_BUILD_DIR),)
+env_ok	:= false
+else ifeq ($(ERLANG_ROOT_DIR),)
+env_ok	:= false
+endif
+ifneq ($(env_ok),true)
+$(error Must run in Rebar3 environment)
 endif
 
-CFLAGS += -fPIC -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR)
-CXXFLAGS += -fPIC -I $(ERTS_INCLUDE_DIR) -I $(ERL_INTERFACE_INCLUDE_DIR)
+prj_dir	:= $(abspath $(CURDIR)/..)
+project	:= $(strip $(notdir $(prj_dir)))
+version	:= $(shell git describe --tags 2>/dev/null | cut -d- -f1)
 
-LDLIBS += -L $(ERL_INTERFACE_LIB_DIR) -lerl_interface -lei
-LDFLAGS += -shared
+# match the 'Osname' returned by erlang os:type()
+sys_type := $(shell uname -s | tr '[A-Z]' '[a-z]')
+# it's unlikely there's any case variation, but make sure
+sys_arch := $(shell uname -m | tr '[A-Z]' '[a-z]')
+sys_rel  := $(shell uname -r | tr '[A-Z]' '[a-z]')
 
-# Verbosity.
+dist_dir := $(prj_dir)/priv
 
-c_verbose_0 = @echo " C     " $(?F);
-c_verbose = $(c_verbose_$(V))
+erts_inc := $(ERLANG_ROOT_DIR)/usr/include
+work_dir := $(REBAR_BUILD_DIR)/lib/$(module)/_work
 
-cpp_verbose_0 = @echo " CPP   " $(?F);
-cpp_verbose = $(cpp_verbose_$(V))
+# base name of the NIF library that will be calculated by the loader
+so_name	:= $(module)
+# where it's going to end up when we're done, this is the default target
+so_dest	:= $(dist_dir)/$(so_name).so
 
-link_verbose_0 = @echo " LD    " $(@F);
-link_verbose = $(link_verbose_$(V))
+# The NIF is pretty straightforward
+nif_srcs := $(wildcard $(prj_dir)/c_src/*.c)
+nif_objs := $(foreach n, $(sort $(basename $(notdir \
+		$(nif_srcs)))), $(work_dir)/$(n).o)
 
-SOURCES := $(shell find $(C_SRC_DIR) -type f \( -name "*.c" -o -name "*.C" -o -name "*.cc" -o -name "*.cpp" \))
-OBJECTS = $(addsuffix .o, $(basename $(SOURCES)))
+o_level	:= -g2 -O3
 
-COMPILE_C = $(c_verbose) $(CC) $(CFLAGS) $(CPPFLAGS) -c
-COMPILE_CPP = $(cpp_verbose) $(CXX) $(CXXFLAGS) $(CPPFLAGS) -c
+LDFLAGS := -m64
+CFLAGS	:= $(LDFLAGS)
+CPPFLAGS := -DVERSION="$(version)"
+ifeq ($(DEBUG),)
+CPPFLAGS += -DNDEBUG
+endif
 
-$(C_SRC_OUTPUT): $(OBJECTS)
-	@mkdir -p $(BASEDIR)/priv/
-	$(link_verbose) $(CC) $(OBJECTS) $(LDFLAGS) $(LDLIBS) -o $(C_SRC_OUTPUT)
+so_flag	:= -shared
 
-%.o: %.c
-	$(COMPILE_C) $(OUTPUT_OPTION) $<
+ecp	:= /bin/cp -p
+# build tools
+ifeq	($(sys_type),darwin)
+ecp	:= /bin/cp -pX
+CC	:= /usr/bin/cc
+LDFLAGS := -arch x86_64
+LDFLAGS	+= $(shell test $(firstword $(subst ., ,$(sys_rel))) -lt 14 \
+		|| echo '-mmacosx-version-min=10.9')
+CFLAGS	:= $(LDFLAGS)
+so_flag	:= -flat_namespace -undefined suppress -dynamiclib
+else ifeq ($(sys_type),freebsd)
+CPPFLAGS += _REENTRANT
+CC	:= $(shell which cc)
+else ifeq ($(sys_type),linux)
+CC	:= $(shell which gcc)
+else ifeq ($(sys_type),sunos)
+CPPFLAGS += _REENTRANT
+CC	:= $(shell which gcc)
+else
+$(error Unsupported platform '$(sys_type)')
+endif
+CFLAGS    += -std=c99 $(o_level) -fPIC -Wall -Wmissing-prototypes
+LDFLAGS   += $(o_level)
+CPPFLAGS  += -I$(erts_inc)
 
-%.o: %.cc
-	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
+V	?= 0
+ifeq	($(V),0)
+c_verbose   = @echo ' C      ' $(<F);
+cp_verbose  = @echo ' CP     ' $(@F);
+ld_verbose  = @echo ' LD     ' $(@F);
+endif
 
-%.o: %.C
-	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
+.PHONY:	default dist clean clean-dist veryclean
 
-%.o: %.cpp
-	$(COMPILE_CPP) $(OUTPUT_OPTION) $<
+# don't automatically clean up intermediates
+.SECONDARY:
 
-clean:
-	@rm -f $(C_SRC_OUTPUT) $(OBJECTS)
+default :: dist
+
+dist :: $(so_dest)
+
+clean ::
+	@echo Deleting work directory
+	@/bin/rm -rf $(work_dir)
+
+clean-dist :: clean
+	@echo Deleting $(notdir $(so_dest))
+	@/bin/rm -f $(so_dest)
+
+veryclean :: clean-dist
+
+$(dist_dir)/$(so_name).so : $(work_dir)/$(so_name).so
+	@test -d $(@D) || /bin/mkdir -p $(@D)
+	$(cp_verbose) $(ecp) $< $@
+
+$(work_dir)/$(so_name).so : $(nif_objs)
+	@test -d $(@D) || /bin/mkdir -p $(@D)
+	$(ld_verbose) $(strip $(CC) $(so_flag) $(LDFLAGS) -o $@ $^)
+
+$(work_dir)/%.o : $(prj_dir)/c_src/%.c
+	@test -d $(@D) || /bin/mkdir -p $(@D)
+	$(c_verbose) $(strip $(CC) -c $(CFLAGS) $(CPPFLAGS) -o $@ $<)
