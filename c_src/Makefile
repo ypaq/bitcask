@@ -96,6 +96,10 @@ CFLAGS    += -std=c99 $(o_level) -fPIC -Wall -Wmissing-prototypes
 LDFLAGS   += $(o_level)
 CPPFLAGS  += -I$(erts_inc)
 
+ifeq ($(enable_pulse), 1)
+CFLAGS    += -DPULSE
+endif
+
 V	?= 0
 ifeq	($(V),0)
 c_verbose   = @echo ' C      ' $(<F);
