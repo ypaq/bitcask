@@ -11,7 +11,7 @@ basic_schema_test_() ->
 basic_schema_test2() ->
     lager:start(),
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config("./priv/bitcask.schema", [], context(), predefined_schema()),
+    Config = cuttlefish_unit:generate_templated_config(priv_dir_file("bitcask.schema"), [], context(), predefined_schema()),
 
     cuttlefish_unit:assert_config(Config, "bitcask.data_root", "./data/bitcask"),
     cuttlefish_unit:assert_config(Config, "bitcask.open_timeout", 4),
@@ -46,7 +46,7 @@ merge_window_test2() ->
     ],
 
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config("./priv/bitcask.schema", Conf, context(), predefined_schema()),
+    Config = cuttlefish_unit:generate_templated_config(priv_dir_file("bitcask.schema"), Conf, context(), predefined_schema()),
 
     cuttlefish_unit:assert_config(Config, "bitcask.data_root", "./data/bitcask"),
     cuttlefish_unit:assert_config(Config, "bitcask.open_timeout", 4),
@@ -99,7 +99,7 @@ override_schema_test2() ->
     ],
 
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config("./priv/bitcask.schema", Conf, context(), predefined_schema()),
+    Config = cuttlefish_unit:generate_templated_config(priv_dir_file("bitcask.schema"), Conf, context(), predefined_schema()),
 
     cuttlefish_unit:assert_config(Config, "bitcask.data_root", "/absolute/data/bitcask"),
     cuttlefish_unit:assert_config(Config, "bitcask.open_timeout", 2),
@@ -132,7 +132,9 @@ multi_backend_test2() ->
            ],
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
     Config = cuttlefish_unit:generate_templated_config(
-               ["./priv/bitcask.schema", "./priv/bitcask_multi.schema", "./test/multi_backend.schema"],
+               [priv_dir_file("bitcask.schema"),
+                priv_dir_file("bitcask_multi.schema"),
+                test_dir_file("multi_backend.schema")],
                Conf, context(), predefined_schema()),
     %%io:format("Config: ~p~n", []),
 
@@ -176,3 +178,37 @@ predefined_schema() ->
                                             {datatype, directory}
                                        ]}),
     {[], [Mapping], []}.
+
+%% Lifted and adapted from hyper, TODO consider moving this and other
+%% similar functions to a separate library app to share across all
+%% other repos
+priv_dir_file(Path) ->
+    filename:join([get_app_home(?MODULE), "priv", Path]).
+
+test_dir_file(Path) ->
+    filename:join([get_app_home(?MODULE), "test", Path]).
+
+
+get_app_home(Module) ->
+    memoize({?MODULE, app_home},
+            fun() -> get_app_home1(Module) end).
+
+%% Use get_object_code, instead of code:which(...), because we may be
+%% running under cover.
+get_app_home1(Module) ->
+    {_, _, BeamPath} = code:get_object_code(Module),
+    filename:dirname(filename:dirname(BeamPath)).
+
+memoize(Key, Fun) ->
+    case erlang:get(Key) of
+        undefined ->
+            Value = not_undefined(Fun()),
+            erlang:put(Key, Value),
+            Value;
+        Value ->
+            Value
+    end.
+
+not_undefined(Value)
+  when Value =/= undefined ->
+    Value.
