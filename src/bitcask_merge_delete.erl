@@ -313,8 +313,7 @@ new_20131217_a_test_() ->
 %% [[{set,{var,1},{call,bitcask_pulse,incr_clock,[]}},{set,{var,2},{call,bitcask_pulse,bc_open,[true]}},{set,{var,3},{call,bitcask_pulse,puts,[{var,2},{1,13},<<0>>]}},{set,{var,10},{call,bitcask_pulse,delete,[{var,2},13]}},{set,{var,14},{call,bitcask_pulse,puts,[{var,2},{1,21},<<0,0,0>>]}},{set,{var,18},{call,bitcask_pulse,puts,[{var,2},{1,15},<<0,0,0>>]}},{set,{var,24},{call,bitcask_pulse,fork_merge,[{var,2}]}},{set,{var,27},{call,bitcask_pulse,bc_close,[{var,2}]}},{set,{var,28},{call,bitcask_pulse,incr_clock,[]}},{set,{var,40},{call,bitcask_pulse,fork,[[{init,{state,undefined,false,false,[]}},{set,{not_var,6},{not_call,bitcask_pulse,bc_open,[false]}},{set,{not_var,17},{not_call,bitcask_pulse,fold,[{not_var,6}]}}]]}}],{99742,1075,90258},[{events,[]}]].
 
 new_20131217_a_body() ->
-    catch token:stop(),
-    TestDir = token:get_name(),
+    TestDir = new_test_dir(),
     bitcask_time:test__set_fudge(10),
     MOD = ?MODULE,
     MFS = 1000,
@@ -358,8 +357,7 @@ new_20131217_c_test_() ->
     {timeout, 300, ?_assertEqual(ok, new_20131217_c_body())}.
 
 new_20131217_c_body() ->
-    catch token:stop(),
-    TestDir = token:get_name(),
+    TestDir = new_test_dir(),
     bitcask_time:test__set_fudge(10),
     MOD = ?MODULE,
     MFS = 1000,
@@ -394,7 +392,7 @@ new_20131217_c_body() ->
 
 %% new_20131217_d_body() ->
 %%     catch token:stop(),
-%%     TestDir = token:get_name(),
+%%     TestDir = new_test_dir(),
 %%     MOD = ?MODULE,
 %%     Val1 = <<0,0,0,0,0,0,0,0,0,0>>,%<<"v111111111">>,
 %%     Val2 = <<0,0,0,0,0,0,0,0,0,0,0,0,0>>,%<<"v222222222222">>,
@@ -439,8 +437,7 @@ new_20131217_e_test_() ->
     {timeout, 300, ?_assertEqual(ok, new_20131217_e_body())}.
 
 new_20131217_e_body() ->
-    catch token:stop(),
-    TestDir = token:get_name(),
+    TestDir = new_test_dir(),
     bitcask_time:test__set_fudge(10),
     MOD = ?MODULE,
     MFS = 400,
@@ -605,5 +602,10 @@ merge_delete_race_pr156_regression_test2() ->
     after
         ok % application:stop(bitcask)
     end.
+
+new_test_dir() ->
+    catch token:stop(),
+    filename:join([bitcask_schema_tests:get_app_home(?MODULE),
+                   token:get_name()]).
 
 -endif. %% TEST
