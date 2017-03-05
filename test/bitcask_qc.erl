@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% bitcask: Eric Brewer-inspired key/value store
-%%
-%% Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2010-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -19,6 +17,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
+
 -module(bitcask_qc).
 
 -ifdef(EQC).
@@ -26,8 +25,6 @@
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include("bitcask.hrl").
-
--compile(export_all).
 
 -define(QC_OUT(P),
         eqc:on_output(fun(Str, Args) -> io:format(user, Str, Args) end, P)).
@@ -63,10 +60,10 @@ apply_kv_ops([{put, K, V} | Rest], Ref, KVs0, Fstats0) ->
                  update_fstats(put, K ,orddict:find(K, KVs0), V, Fstats0));
 apply_kv_ops([{delete, K, _} | Rest], Ref, KVs0, Fstats0) ->
     ok = bitcask:delete(Ref, K),
-    case orddict:find(K, KVs0) of 
-        error -> 
+    case orddict:find(K, KVs0) of
+        error ->
             apply_kv_ops(Rest, Ref, KVs0, Fstats0);
-        {ok, deleted} -> 
+        {ok, deleted} ->
             apply_kv_ops(Rest, Ref, KVs0, Fstats0);
         OldVal ->
             apply_kv_ops(Rest, Ref, orddict:store(K, deleted, KVs0),
@@ -88,7 +85,7 @@ apply_kv_ops([{itr_release, _K, _} | Rest], Ref, KVs, Fstats) ->
 
 
 %% Delete existing key (i.e. write tombstone)
-update_fstats(delete, K, {ok, OldV}, _NewV, Fstats0) -> 
+update_fstats(delete, K, {ok, OldV}, _NewV, Fstats0) ->
     #m_fstats{key_bytes = KB, live_keys = LK, live_bytes = LB} = Fstats0,
     TotalSz = total_sz(K, OldV),
     Fstats0#m_fstats{key_bytes = KB - size(K),
@@ -97,7 +94,7 @@ update_fstats(delete, K, {ok, OldV}, _NewV, Fstats0) ->
 %% Update m_fstats record - this will be the aggregate of all files in the bitcask
 update_fstats(put, K, ErrDel, NewV,
               #m_fstats{key_bytes = KB,
-                        live_keys = LK, live_bytes = LB, 
+                        live_keys = LK, live_bytes = LB,
                         total_keys = TK, total_bytes = TB} = Fstats)
   when ErrDel =:= error; ErrDel =:= {ok, deleted} ->
     %% Add for first time or update after deletion
@@ -105,9 +102,9 @@ update_fstats(put, K, ErrDel, NewV,
     Fstats#m_fstats{key_bytes = KB + size(K),
                     live_keys = LK + 1, live_bytes = LB + NewTotalSz,
                     total_keys = TK + 1, total_bytes = TB + NewTotalSz};
-update_fstats(put, K, {ok, OldV}, NewV, #m_fstats{live_bytes = LB, 
+update_fstats(put, K, {ok, OldV}, NewV, #m_fstats{live_bytes = LB,
                                                   total_keys = TK,
-                                                  total_bytes = TB} = Fstats) -> 
+                                                  total_bytes = TB} = Fstats) ->
     %% update existing key
     OldTotalSz = total_sz(K, OldV),
     NewTotalSz = total_sz(K, NewV),
@@ -118,7 +115,7 @@ check_fstats(Ref, Expect) ->
     Aggregate = fun({_FileId, FileLiveCount, FileTotalCount, FileLiveBytes, FileTotalBytes,
                      _FileOldestTstamp, _FileNewestTstamp, _ExpEpoch},
                     {LiveCount0, TotalCount0, LiveBytes0, TotalBytes0}) ->
-                        {LiveCount0 + FileLiveCount, TotalCount0 + FileTotalCount, 
+                        {LiveCount0 + FileLiveCount, TotalCount0 + FileTotalCount,
                          LiveBytes0 + FileLiveBytes, TotalBytes0 + FileTotalBytes}
                 end,
     {KeyCount, KeyBytes, Fstats, _, _} = bitcask_nifs:keydir_info(get_keydir(Ref)),
@@ -158,7 +155,7 @@ prop_merge() ->
          ?FORALL({Ops, M1, M2}, {eqc_gen:non_empty(list(ops(Keys, Values))),
                                  choose(1,128), choose(1,128)},
                  begin
-                     Tm = tuple_to_list(now()),
+                     Tm = tuple_to_list(os:timestamp()),
                      Dir = lists:flatten(
                              io_lib:format(
                                "/tmp/bc.prop.merge.~w.~w.~w", Tm)),
@@ -175,7 +172,7 @@ prop_merge() ->
 
                          %% Apply the merge -- note that we keep the
                          %% bitcask open so that a live keydir is
-                         %% available to the merge.  Run in a seperate 
+                         %% available to the merge.  Run in a seperate
                          %% process so it gets cleaned up on crash
                          %% so quickcheck can shrink correctly.
                          Me = self(),
@@ -356,7 +353,7 @@ prop_fold_test_() ->
 
 
 get_keydir(Ref) ->
-    element(9, erlang:get(Ref)).    
+    element(9, erlang:get(Ref)).
 
 -endif.
 

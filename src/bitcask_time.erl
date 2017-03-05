@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% bitcask: Eric Brewer-inspired key/value store
-%%
-%% Copyright (c) 2011 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2011-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -19,6 +17,7 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
+
 -module(bitcask_time).
 
 -export([tstamp/0]).
@@ -56,8 +55,14 @@ test__get(Key) ->
             {Mega, Sec, _Micro} = os:timestamp(),
             (Mega * 1000000) + Sec;
         yes_testing ->
-            {ok, Fudge} = application:get_env(bitcask, Key),
-            Fudge
+            %% Something, somewhere can delete the Key, not looking now
+            case application:get_env(bitcask, Key) of
+                undefined ->
+                    put(Key, no_testing),
+                    test__get(Key);
+                {ok, Fudge} ->
+                    Fudge
+            end
     end.
 
 test__clear_fudge() ->

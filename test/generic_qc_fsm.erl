@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% Testing testing testing
-%%
-%% Copyright (c) 2014 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2014-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -19,8 +17,9 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
--module(generic_qc_fsm).
+
 %% Borrowed heavily from bitcask_qc_fsm.erl
+-module(generic_qc_fsm).
 
 %% Example usage:
 %%
@@ -163,7 +162,7 @@ prop(FI_enabledP, VerboseP) ->
                 faulterl_nif:poke("bc_fi_enabled", 0, <<0:8/native>>, false),
                 [catch erlang:garbage_collect(Pid) || Pid <- erlang:processes()],
 
-                {Ta, Tb, Tc} = now(),
+                {Ta, Tb, Tc} = os:timestamp(),
                 TestDir = ?TEST_DIR ++ lists:flatten(io_lib:format(".~w.~w.~w", [Ta, Tb, Tc])),
                 ok = file:make_dir(TestDir),
                 Env = [{parameter_test_dir, TestDir}],
@@ -207,7 +206,7 @@ prop(FI_enabledP, VerboseP) ->
                   SimpleTrace = simplify_trace(Trace),
                   ?QC_FMT("Trace: ~P\nverify_trace: ~P\n", [SimpleTrace, 25, Sane, 25])
                 end,
-                aggregate(zip(state_names(H),command_names(Cmds)), 
+                aggregate(zip(state_names(H),command_names(Cmds)),
                           conjunction([{postconditions, equals(Res, ok)},
                                        {verify_trace, Sane}])))
             end).
@@ -323,7 +322,7 @@ zero_suffix_p(K) ->
     PrefixLen = byte_size(K) - 4,
     <<_:PrefixLen/binary, Suffix/binary>> = K,
     Suffix == <<0,0,0,0>>.
- 
+
 %% Weight for transition (this callback is optional).
 %% Specify how often each transition should be chosen
 weight(_From, _To,{call,_,close,_}) ->
@@ -388,7 +387,7 @@ get(not_open, _K) ->
     ignored;
 get(H, K) ->
     %% io:format(user, "get ~p,", [K]),
-    
+
     case bitcask:get(H, K) of
         {ok, V} = X ->
             event_logger:event({get, get, K, V}),
@@ -443,7 +442,7 @@ fold_all(H) ->
                 [{K,V}|Acc]
         end,
     io:format(user, "<f", []),
-    ID = now(),
+    ID = os:timestamp(),
     event_logger:event({fold, start, ID}),
     case bitcask:fold(H, F, []) of
         {error, _} ->

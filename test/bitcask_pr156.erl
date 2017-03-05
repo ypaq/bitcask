@@ -1,17 +1,41 @@
+%% -------------------------------------------------------------------
+%%
+%% Copyright (c) 2014-2017 Basho Technologies, Inc.
+%%
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
+%%
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
+%% under the License.
+%%
+%% -------------------------------------------------------------------
+
 -module(bitcask_pr156).
 
--include("bitcask.hrl").
-
--ifdef(TEST).
--compile(export_all).
 -include_lib("eunit/include/eunit.hrl").
--endif.
+-include("bitcask.hrl").
 
 -define(BITCASK, "/tmp/bc.pr156_regression").
 %% Number of keys used in the tests
 -define(NUM_KEYS, 50).
 %% max_file_size given to bitcask.
 -define(FILE_SIZE, 400).
+
+-ifdef(NO_RAND_MODULE).
+-define(rand_seed(S),       random:seed(S)).
+-define(rand_uniform(N),    random:uniform(N)).
+-else.
+-define(rand_seed(S),       rand:seed(exsplus, S)).
+-define(rand_uniform(N),    rand:uniform(N)).
+-endif.
 
 pr156_regression1_test_() ->
     %% This is a test for a setuid-bit regression late in the
@@ -34,7 +58,7 @@ pr156_regression2_test_() ->
      end}.
 
 pr156_regression1(X) ->
-    io:format("pr156_regression1 ~p at ~p\n", [X, now()]),
+    io:format("pr156_regression1 ~p at ~p\n", [X, os:timestamp()]),
     token:next_name(),
     Dir = ?BITCASK ++ ".1." ++ token:get_name(),
     os:cmd("rm -rf " ++ Dir),
@@ -74,7 +98,7 @@ pr156_regression1(X) ->
 %% r1s11.bos1 executes each of N iterations in about 1500 msec.
 
 pr156_regression2(X) ->
-    io:format("pr156_regression2 ~p at ~p\n", [X, now()]),
+    io:format("pr156_regression2 ~p at ~p\n", [X, os:timestamp()]),
     token:next_name(),
     Dir = ?BITCASK ++ ".2." ++ token:get_name(),
     os:cmd("rm -rf " ++ Dir),
@@ -136,12 +160,12 @@ check_no_tombstones(Ref, Good) ->
     end.
 
 make_merge_txt(Dir, Seed, Probability) ->
-    random:seed(Seed),
+    ?rand_seed(Seed),
     case filelib:is_dir(Dir) of
         true ->
             DataFiles = filelib:wildcard("*.data", Dir),
             {ok, FH} = file:open(Dir ++ "/merge.txt", [write]),
-            [case random:uniform(100) < Probability of
+            [case ?rand_uniform(100) < Probability of
                  true ->
                      io:format(FH, "~s\n", [DF]);
                  false ->

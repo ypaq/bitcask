@@ -1,7 +1,26 @@
+%% -------------------------------------------------------------------
+%%
+%% Copyright (c) 2010-2017 Basho Technologies, Inc.
+%%
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
+%%
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
+%% under the License.
+%%
+%% -------------------------------------------------------------------
+
 -module(bitcask_schema_tests).
 
 -include_lib("eunit/include/eunit.hrl").
--compile(export_all).
 
 %% basic schema test will check to make sure that all defaults from the schema
 %% make it into the generated app.config
@@ -10,8 +29,9 @@ basic_schema_test_() ->
 
 basic_schema_test2() ->
     lager:start(),
-    %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config(priv_dir_file("bitcask.schema"), [], context(), predefined_schema()),
+    %% The defaults are defined in ../priv/bitcask.schema. it is the file under test.
+    Config = cuttlefish_unit:generate_templated_config(
+        bitcask:app_priv_dir_file("bitcask.schema"), [], context(), predefined_schema()),
 
     cuttlefish_unit:assert_config(Config, "bitcask.data_root", "./data/bitcask"),
     cuttlefish_unit:assert_config(Config, "bitcask.open_timeout", 4),
@@ -46,7 +66,8 @@ merge_window_test2() ->
     ],
 
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config(priv_dir_file("bitcask.schema"), Conf, context(), predefined_schema()),
+    Config = cuttlefish_unit:generate_templated_config(
+        bitcask:app_priv_dir_file("bitcask.schema"), Conf, context(), predefined_schema()),
 
     cuttlefish_unit:assert_config(Config, "bitcask.data_root", "./data/bitcask"),
     cuttlefish_unit:assert_config(Config, "bitcask.open_timeout", 4),
@@ -99,7 +120,8 @@ override_schema_test2() ->
     ],
 
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config(priv_dir_file("bitcask.schema"), Conf, context(), predefined_schema()),
+    Config = cuttlefish_unit:generate_templated_config(
+        bitcask:app_priv_dir_file("bitcask.schema"), Conf, context(), predefined_schema()),
 
     cuttlefish_unit:assert_config(Config, "bitcask.data_root", "/absolute/data/bitcask"),
     cuttlefish_unit:assert_config(Config, "bitcask.open_timeout", 2),
@@ -131,11 +153,11 @@ multi_backend_test2() ->
             {["multi_backend", "default", "bitcask", "data_root"], "/data/default_bitcask"}
            ],
     %% The defaults are defined in ./priv/bitcask.schema. it is the file under test.
-    Config = cuttlefish_unit:generate_templated_config(
-               [priv_dir_file("bitcask.schema"),
-                priv_dir_file("bitcask_multi.schema"),
-                test_dir_file("multi_backend.schema")],
-               Conf, context(), predefined_schema()),
+    Config = cuttlefish_unit:generate_templated_config([
+            bitcask:app_priv_dir_file("bitcask.schema"),
+            bitcask:app_priv_dir_file("bitcask_multi.schema"),
+            bitcask:app_test_dir_file("multi_backend.schema")
+        ], Conf, context(), predefined_schema()),
     %%io:format("Config: ~p~n", []),
 
     MultiBackendConfig = proplists:get_value(multi_backend, proplists:get_value(riak_kv, Config)),
@@ -178,37 +200,3 @@ predefined_schema() ->
                                             {datatype, directory}
                                        ]}),
     {[], [Mapping], []}.
-
-%% Lifted and adapted from hyper, TODO consider moving this and other
-%% similar functions to a separate library app to share across all
-%% other repos
-priv_dir_file(Path) ->
-    filename:join([get_app_home(?MODULE), "priv", Path]).
-
-test_dir_file(Path) ->
-    filename:join([get_app_home(?MODULE), "test", Path]).
-
-
-get_app_home(Module) ->
-    memoize({?MODULE, app_home},
-            fun() -> get_app_home1(Module) end).
-
-%% Use get_object_code, instead of code:which(...), because we may be
-%% running under cover.
-get_app_home1(Module) ->
-    {_, _, BeamPath} = code:get_object_code(Module),
-    filename:dirname(filename:dirname(BeamPath)).
-
-memoize(Key, Fun) ->
-    case erlang:get(Key) of
-        undefined ->
-            Value = not_undefined(Fun()),
-            erlang:put(Key, Value),
-            Value;
-        Value ->
-            Value
-    end.
-
-not_undefined(Value)
-  when Value =/= undefined ->
-    Value.

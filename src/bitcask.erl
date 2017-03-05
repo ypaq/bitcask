@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% bitcask: Eric Brewer-inspired key/value store
-%%
-%% Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2010-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -19,6 +17,8 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
+
+%% @doc Eric Brewer-inspired key/value store
 -module(bitcask).
 
 -export([open/1, open/2,
@@ -42,25 +42,65 @@
 -export([get_opt/2,
          get_filestate/2,
          is_tombstone/1]).
--export([has_pending_delete_bit/1]).                    % For EUnit tests
+
+%% Make sure only a consistent set of test macros are defined so we don't
+%% have to keep checking them all repeatedly.
+-ifndef(TEST).
+-undef(EQC).
+-undef(PULSE).
+-else.
+-ifndef(EQC).
+-undef(PULSE).
+-endif.
+-endif.
+
+-ifdef(TEST).
+-export([
+    app_priv_dir/0,
+    app_priv_dir_file/1,
+    app_test_dir/0,
+    app_test_dir_file/1,
+    create_test_dir/0,
+    delete_test_dir/1,
+    has_pending_delete_bit/1,
+    leak_t0/0,
+    leak_t1/0,
+    make_merge_file/3,
+    rand_bytes/1,
+    readable_files/1,
+    subfold/3
+]).
+-endif.
+
+-ifdef(PULSE).
+-compile({parse_transform, pulse_instrument}).
+-endif. % PULSE
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 -include_lib("kernel/include/file.hrl").
 -include("bitcask.hrl").
 
+-ifdef(NO_RAND_MODULE).
+-define(rand_seed(S),       random:seed(S)).
+-define(rand_uniform(N),    random:uniform(N)).
+-else.
+-define(rand_seed(S),       rand:seed(exsplus, S)).
+-define(rand_uniform(N),    rand:uniform(N)).
+-endif.
+
+-ifdef(NO_NAMESPACED_TYPES).
+-type bitcask_set() :: set().
+-else.
+-type bitcask_set() :: sets:set().
+-endif.
 
 -ifdef(PULSE).
--compile({parse_transform, pulse_instrument}).
--compile(export_all).
 -define(OPEN_FOLD_RETRIES, 100).
 -else.
 -define(OPEN_FOLD_RETRIES, 3).
--endif.
-
--ifdef(TEST).
--compile(export_all).
--include_lib("eunit/include/eunit.hrl").
--include_lib("kernel/include/file.hrl").
--export([leak_t0/0, leak_t1/0]).
 -endif.
 
 %% In the real world, 1 or 2 retries is usually sufficient.  In the
@@ -86,12 +126,6 @@
                    % 0 = old style without file id, 2 = new style with file id
                    tombstone_version = 2 :: 0 | 2
                   }).
-
--ifdef(namespaced_types).
--type bitcask_set() :: sets:set().
--else.
--type bitcask_set() :: set().
--endif.
 
 -record(mstate, { dirname :: string(),
                   merge_lock :: reference(),
@@ -2028,6 +2062,73 @@ interfere_with_pulse_test_only() ->
 %% ===================================================================
 -ifdef(TEST).
 
+%% Return the path to the application's 'priv' directory under Rebar2/3 EUnit.
+-spec app_priv_dir() -> string().
+app_priv_dir() ->
+    Key = {?MODULE, priv_dir},
+    case erlang:get(Key) of
+        undefined ->
+            Dir = cuttlefish_unit:lib_priv_dir(?MODULE),
+            _ = erlang:put(Key, Dir),
+            Dir;
+        Val ->
+            Val
+    end.
+
+%% Return the path to a file within the application's 'priv' directory under Rebar2/3 EUnit.
+-spec app_priv_dir_file(File :: string()) -> string().
+app_priv_dir_file(File) ->
+    filename:join(app_priv_dir(), File).
+
+%% Return the path to the application's 'test' directory under Rebar2/3 EUnit.
+-spec app_test_dir() -> string().
+app_test_dir() ->
+    Key = {?MODULE, test_dir},
+    case erlang:get(Key) of
+        undefined ->
+            Dir = cuttlefish_unit:lib_test_dir(?MODULE),
+            _ = erlang:put(Key, Dir),
+            Dir;
+        Val ->
+            Val
+    end.
+
+%% Return the path to a file within the application's 'test' directory under Rebar2/3 EUnit.
+-spec app_test_dir_file(File :: string()) -> string().
+app_test_dir_file(File) ->
+    filename:join(app_test_dir(), File).
+
+%% Creates a new, empty, uniquely-named directory for testing.
+-spec create_test_dir() -> string().
+create_test_dir() ->
+    string:strip(?cmd("mktemp -d /tmp/" ?MODULE_STRING ".XXXXXXX"), both, $\n).
+
+%% Deletes a test directory fully, whether or not it exists.
+-spec delete_test_dir(Dir :: string()) -> ok.
+delete_test_dir(Dir) ->
+    ?assertCmd("rm -rf " ++ Dir).
+
+%% Equivalent to crypto:rand_bytes/1 or crypto:strong_rand_bytes/1, based
+%% on availability. For testing, we don't really need secure randomization,
+%% so use the cheaper rand_bytes if it's available.
+-spec rand_bytes(N :: pos_integer()) -> binary().
+rand_bytes(N) ->
+    Key = {?MODULE, rand_bytes_func},
+    Func = case erlang:get(Key) of
+        undefined ->
+            Fnc = case erlang:function_exported(crypto, rand_bytes, 1) of
+                true ->
+                    rand_bytes;
+                _ ->
+                    strong_rand_bytes
+            end,
+            _ = erlang:put(Key, Fnc),
+            Fnc;
+        Val ->
+            Val
+    end,
+    crypto:Func(N).
+
 init_dataset(Dirname, KVs) ->
     init_dataset(Dirname, [], KVs).
 
@@ -2238,7 +2339,7 @@ fold_corrupt_file_test2() ->
 % and a pending hash is created. There *has* to be an iterator open when you
 % call this or it will loop for ever and ever. Don't try this at home.
 put_till_frozen(B) ->
-    Key = crypto:rand_bytes(32),
+    Key = rand_bytes(32),
     bitcask:put(B, Key, <<>>),
     bitcask:delete(B, Key),
 
@@ -3681,12 +3782,12 @@ update_tombstones_test() ->
     ?assertEqual(1, TombCount).
 
 make_merge_file(Dir, Seed, Probability) ->
-    random:seed(Seed),
+    ?rand_seed(Seed),
     case filelib:is_dir(Dir) of
         true ->
             DataFiles = filelib:wildcard("*.data", Dir),
             {ok, FH} = file:open(Dir ++ "/merge.txt", [write,raw]),
-            [case random:uniform(100) < Probability of
+            [case ?rand_uniform(100) < Probability of
                  true ->
                      file:write(FH, io_lib:format("~s\n", [DF]));
                  false ->
@@ -3697,4 +3798,4 @@ make_merge_file(Dir, Seed, Probability) ->
             ok
     end.
 
--endif.
+-endif. % TEST

@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% bitcask: Eric Brewer-inspired key/value store
-%%
-%% Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2010-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -19,21 +17,26 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
+
 -module(bitcask_qc_fsm).
 
--export([create_stale_lock/0,
-         corrupt_hint/2,
-         truncate_hint/2]).
-
--define(TEST_DIR, "/tmp/bitcask.qc." ++ os:getpid()).
--include_lib("kernel/include/file.hrl").
+-export([
+    corrupt_hint/2,
+    create_stale_lock/0,
+    truncate_hint/2
+]).
 
 -ifdef(EQC).
-
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_fsm.hrl").
--include_lib("eunit/include/eunit.hrl").
+-endif. % EQC
 
+-include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/file.hrl").
+
+-define(TEST_DIR, "/tmp/bitcask.qc." ++ os:getpid()).
+
+-ifdef(EQC).
 -compile(export_all).
 
 -record(state,{ bitcask :: reference(),
@@ -152,7 +155,7 @@ prop_bitcask() ->
                         bitcask:close(Ref)
                 end,
                 application:unload(bitcask),
-                aggregate(zip(state_names(H),command_names(Cmds)), 
+                aggregate(zip(state_names(H),command_names(Cmds)),
                           equals(Res, ok))
             end).
 
@@ -182,7 +185,7 @@ value() ->
 sync_strategy() ->
     {sync_strategy, oneof([none, o_sync])}.
 
--endif.
+-endif. % EQC
 
 create_stale_lock() ->
     Fname = filename:join(?TEST_DIR, "bitcask.write.lock"),

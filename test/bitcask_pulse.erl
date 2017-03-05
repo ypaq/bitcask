@@ -1,28 +1,49 @@
-%%% File        : bitcask_pulse.erl
-%%% Author      : Ulf Norell, Hans Svensson
-%%% Description : Bitcask stress testing
-%%% Created     : 19 Mar 2012 by Ulf Norell
+%% -------------------------------------------------------------------
+%%
+%% Copyright (c) 2012-2017 Basho Technologies, Inc.
+%%
+%% This file is provided to you under the Apache License,
+%% Version 2.0 (the "License"); you may not use this file
+%% except in compliance with the License.  You may obtain
+%% a copy of the License at
+%%
+%%   http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing,
+%% software distributed under the License is distributed on an
+%% "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+%% KIND, either express or implied.  See the License for the
+%% specific language governing permissions and limitations
+%% under the License.
+%%
+%% -------------------------------------------------------------------
+
+%% Original attribution:
+%%  File        : bitcask_pulse.erl
+%%  Author      : Ulf Norell, Hans Svensson
+%%  Description : Bitcask stress testing
+%%  Created     : 19 Mar 2012 by Ulf Norell
 -module(bitcask_pulse).
 
-%% The while module is ifdef:ed, rebar should set PULSE
+%% Even if PULSE is externally defined, don't run if QC isn't installed.
+-ifdef(EQC).
 -ifdef(PULSE).
 
 -compile(export_all).
 
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
-
+-include_lib("eunit/include/eunit.hrl").
 -include("bitcask.hrl").
 
--include_lib("eunit/include/eunit.hrl").
-
 -compile({parse_transform, pulse_instrument}).
--compile({pulse_replace_module,
-  [{application, pulse_application}]}).
 %% The following functions contains side_effects but are run outside
 %% PULSE, i.e. PULSE needs to leave them alone
--compile({pulse_skip,[{prop_pulse_test_,0},{really_delete_bitcask,0},{copy_bitcask_app,0}]}).
--compile({pulse_no_side_effect,[{file,'_','_'}, {erlang, now, 0}]}).
+-compile({pulse_skip, [
+    {prop_pulse_test_,0},
+    {really_delete_bitcask,0},
+    {copy_bitcask_app,0}
+]}).
 
 %% The token module keeps track of the currently used directory for
 %% bitcask. Each test uses a fresh directory!
@@ -276,7 +297,7 @@ host() ->
 
 %% Generate a most likely unique node name
 unique_name() ->
-  {A, B, C} = erlang:now(),
+  {A, B, C} = os:timestamp(),
   list_to_atom(lists:concat([integer_to_list(A), "-",
                              integer_to_list(B), "-",
                              integer_to_list(C)])).
@@ -662,35 +683,52 @@ check_fold_keys_result([], []) ->
   true.
 
 %% Presenting command data statistics in a nicer way
+%% TODO: This needs to be re-implemented - nothing matches.
+%% The final catch-all head is the only one that ever matches anything
+%% with current Pulse.
 command_data({set, _, {call, _, merge, _}}, {_S, V}) ->
-  case V of
-    {error, {merge_locked, _, _}} -> {merge, locked};
-    _                             -> {merge, V}
-  end;
+    case V of
+        {error, {merge_locked, _, _}} ->
+            {merge, locked};
+        _ ->
+            {merge, V}
+    end;
 command_data({set, _, {call, _, fork_merge, _}}, {_S, V}) ->
-  case V of
-    {'EXIT', _} -> {fork_merge, 'EXIT'};
-    _           -> {fork_merge, V}
-  end;
+    case V of
+        {'EXIT', _} ->
+            {fork_merge, 'EXIT'};
+        _ ->
+            {fork_merge, V}
+    end;
 command_data({set, _, {call, _, bc_open, _}}, {_S, V}) ->
-  case V of
-    {'EXIT', _} -> {bc_open, 'EXIT'};
-    {error, Err} -> {bc_open, Err};
-    _  when is_reference(V) -> bc_open
-  end;
+    case V of
+        {'EXIT', _} ->
+            {bc_open, 'EXIT'};
+        {error, Err} ->
+            {bc_open, Err};
+        _ when is_reference(V) ->
+            bc_open
+    end;
 command_data({set, _, {call, _, needs_merge, _}}, {_S, V}) ->
-  case V of
-    {true, _} -> {needs_merge, true};
-    false     -> {needs_merge, false};
-    Else      -> {needs_merge, Else}
-  end;
+    case V of
+        {true, _} ->
+            {needs_merge, true};
+        false ->
+            {needs_merge, false};
+        Else ->
+            {needs_merge, Else}
+    end;
 command_data({set, _, {call, _, kill, [Pid]}}, {_S, _V}) ->
-  case Pid of
-    bitcask_merge_worker -> {kill, merger};
-    _                    -> {kill, reader}
-  end;
+    case Pid of
+        bitcask_merge_worker ->
+            {kill, merger};
+        _ ->
+            {kill, reader}
+    end;
 command_data({set, _, {call, _, Fun, _}}, {_S, _V}) ->
-  Fun.
+    Fun;
+command_data(C, D) ->
+    {C, D}.
 
 %% Wait for all forks to return their results
 fork_results(Pids) ->
@@ -1021,7 +1059,7 @@ custom_shrink(CE=[_,Seed|_], [C|Cs], Repeat) ->
   end.
 
 check_many(C, N) ->
-  check_many(erlang:now(), C, N).
+  check_many(os:timestamp(), C, N).
 
 check_many(_, _, 0) -> true;
 check_many(Seed, C0, N) ->
@@ -1036,18 +1074,17 @@ mk_counterexample(CE = [Cmds, _Seed, Conj]) when is_list(Cmds) andalso is_list(C
 mk_counterexample(CE = [Cmds, _Seed]) when is_list(Cmds) ->
   CE;
 mk_counterexample(Cmds) ->
-  S = state_after(?MODULE, Cmds),
-  [Cmds, erlang:now(),
-   [ {0, []} | [ {I, []}
-                 || I <- lists:seq(1, length(S#state.readers)) ] ]
-   ++ [ {errors, []}, {events, []} ] ].
+    S = state_after(?MODULE, Cmds),
+    [Cmds, os:timestamp(),
+        [{0, []} | [{I, []} || I <- lists:seq(1, length(S#state.readers))]]
+        ++ [{errors, []}, {events, []}] ].
 
 mk_counterexample(Cmds, Seed) ->
   [_Cmds, _Seed, Conj] = mk_counterexample(Cmds),
   [Cmds, Seed, Conj].
 
 foo() ->
-  erlang:now().
+    os:timestamp().
 
 %% Helper functions
 fold(F, X) ->
@@ -1139,4 +1176,5 @@ mangle_temporal_relation_with_finite_time([H|T]) ->
 %%             {check_no_tombstones, Else}
 %%     end.
 
--endif.
+-endif. % PULSE
+-endif. % EQC

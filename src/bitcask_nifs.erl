@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% bitcask: Eric Brewer-inspired key/value store
-%%
-%% Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+%% Copyright (c) 2010-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -19,86 +17,101 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
+
 -module(bitcask_nifs).
 
--export([init/0,
-         keydir_new/0, keydir_new/1,
-         maybe_keydir_new/1,
-         keydir_mark_ready/1,
-         keydir_put/7,
-         keydir_put/8,
-         keydir_put/9,
-         keydir_put/10,
-         keydir_get/2,
-         keydir_get/3,
-         keydir_get_epoch/1,
-         keydir_remove/2, keydir_remove/5,
-         keydir_copy/1,
-         keydir_fold/5,
-         keydir_itr/3,
-         keydir_itr_next/1,
-         keydir_itr_release/1,
-         keydir_frozen/4,
-         keydir_wait_pending/1,
-         keydir_info/1,
-         keydir_release/1,
-         increment_file_id/1,
-         increment_file_id/2,
-         keydir_trim_fstats/2,
-         update_fstats/8,
-         set_pending_delete/2,
-         lock_acquire/2,
-         lock_release/1,
-         lock_readdata/1,
-         lock_writedata/2,
-         file_open/2,
-         file_close/1,
-         file_sync/1,
-         file_pread/3,
-         file_pwrite/3,
-         file_read/2,
-         file_write/2,
-         file_position/2,
-         file_seekbof/1,
-         file_truncate/1]).
+-export([
+    keydir_new/0, keydir_new/1,
+    maybe_keydir_new/1,
+    keydir_mark_ready/1,
+    keydir_put/7,
+    keydir_put/8,
+    keydir_put/9,
+    keydir_put/10,
+    keydir_get/2,
+    keydir_get/3,
+    keydir_get_epoch/1,
+    keydir_remove/2, keydir_remove/5,
+    keydir_copy/1,
+    keydir_fold/5,
+    keydir_itr/3,
+    keydir_itr_next/1,
+    keydir_itr_release/1,
+    keydir_frozen/4,
+    keydir_wait_pending/1,
+    keydir_info/1,
+    keydir_release/1,
+    increment_file_id/1,
+    increment_file_id/2,
+    keydir_trim_fstats/2,
+    update_fstats/8,
+    set_pending_delete/2,
+    lock_acquire/2,
+    lock_release/1,
+    lock_readdata/1,
+    lock_writedata/2,
+    file_open/2,
+    file_close/1,
+    file_sync/1,
+    file_pread/3,
+    file_pwrite/3,
+    file_read/2,
+    file_write/2,
+    file_position/2,
+    file_seekbof/1,
+    file_truncate/1
+]).
 
--on_load(init/0).
-
--include("bitcask.hrl").
-
--ifdef(PULSE).
--compile({parse_transform, pulse_instrument}).
--export([set_pulse_pid/1]).
--compile({pulse_skip, [{init,0}]}).
+%% Make sure only a consistent set of test macros are defined so we don't
+%% have to keep checking them all repeatedly.
+-ifndef(TEST).
+-undef(EQC).
+-undef(PULSE).
+-else.
+-ifndef(EQC).
+-undef(PULSE).
+-endif.
 -endif.
 
 -ifdef(TEST).
+-export([
+    keydir_itr_int/4
+]).
+-endif.
+
+-ifdef(BASHO_CHECK).
+%% Dialyzer and XRef won't recognize 'on_load' as using the function and
+%% will complain about it.
+-export([init_nif_lib/0]).
+-endif.
+-on_load(init_nif_lib/0).
+
+-ifdef(PULSE).
+-export([
+    set_pulse_pid/1
+]).
+-compile({parse_transform, pulse_instrument}).
+-compile({pulse_skip, [{init_nif_lib, 0}]}).
+-endif. % PULSE
+
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
--endif.
--compile(export_all).
+-endif. % EQC
+
+-ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--endif.
+-endif. % TEST
 
--type errno_atom() :: atom().                   % POSIX errno as atom
+-include("bitcask.hrl").
 
+-type errno_atom() :: atom().   % POSIX errno as atom
 
--spec init() ->
-        ok | {error, any()}.
-init() ->
-    SoName =
-    case code:priv_dir(bitcask) of
-        {error, bad_name} ->
-            case code:which(?MODULE) of
-                Filename when is_list(Filename) ->
-                    filename:join([filename:dirname(Filename),"../priv", "bitcask"]);
-                _ ->
-                    filename:join("../priv", "bitcask")
-            end;
-         Dir ->
-            filename:join(Dir, "bitcask")
-    end,
-    erlang:load_nif(SoName, 0).
+%% Application options and NIF library base name.
+-define(APPLICATION,        bitcask).
+%% Minimum OTP release at which we'll look for a NIF library with
+%% alternate scheduling support.
+-define(MIN_OTP_ALT_SCHED,  18).
+-define(ALT_SCHED_SUFFIX,   "_as").
 
 -ifdef(PULSE).
 set_pulse_pid(_Pid) ->
@@ -473,7 +486,6 @@ file_truncate(Ref) ->
 file_truncate_int(_Ref) ->
     erlang:nif_error({error, not_loaded}).
 
-
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
@@ -483,6 +495,51 @@ keydir_fold_cont(not_found, _Ref, _Fun, Acc0) ->
 keydir_fold_cont(Curr, Ref, Fun, Acc0) ->
     Acc = Fun(Curr, Acc0),
     keydir_fold_cont(keydir_itr_next(Ref), Ref, Fun, Acc).
+
+%% ===================================================================
+%% NIF initialization
+%% ===================================================================
+
+-spec init_nif_lib() -> ok | {error, string()}.
+init_nif_lib() ->
+    SoDir = case code:priv_dir(?APPLICATION) of
+        {error, bad_name} ->
+            ADir =  case code:which(?MODULE) of
+                Beam when is_list(Beam) ->
+                    filename:dirname(filename:dirname(Beam));
+                _ ->
+                    {ok, CWD} = file:get_cwd(),
+                    % This is almost certainly wrong, but it'll end
+                    % up equivalent to "../priv".
+                    filename:dirname(CWD)
+            end,
+            filename:join(ADir, "priv");
+        PDir ->
+            PDir
+    end,
+    SoBase = filename:join(SoDir, ?APPLICATION),
+    AppEnv = application:get_all_env(?APPLICATION),
+    {OtpRel, _} = string:to_integer(case erlang:system_info(otp_release) of
+        [$R | Rel] ->
+            Rel;
+        Rel ->
+            Rel
+    end),
+    case OtpRel >= ?MIN_OTP_ALT_SCHED andalso
+            erlang:system_info(dirty_cpu_schedulers) > 0 of
+        true ->
+            SoAlt = SoBase ++ ?ALT_SCHED_SUFFIX,
+            case erlang:load_nif(SoAlt, AppEnv) of
+                ok ->
+                    ok;
+                {error, {old_code, _}} = Fatal ->
+                    Fatal;
+                _ ->
+                    erlang:load_nif(SoBase, AppEnv)
+            end;
+        _ ->
+            erlang:load_nif(SoBase, AppEnv)
+    end.
 
 %% ===================================================================
 %% EUnit tests
@@ -721,9 +778,8 @@ keydir_itr_out_of_date_test2() ->
     ok = bitcask_nifs:keydir_itr_int(Ref1, 1000000, 0, 0),
     put_till_frozen(Ref1, Name),
     {ready, Ref2} = bitcask_nifs:keydir_new(Name),
-    %% now() will have ensured a new usecs for keydir_itr/3 - check out of date immediately
-    ?assertEqual(out_of_date, bitcask_nifs:keydir_itr_int(Ref2, 1000001,
-                                                          0, 0)),
+    %% now-like time will have ensured a new usecs for keydir_itr/3 - check out of date immediately
+    ?assertEqual(out_of_date, bitcask_nifs:keydir_itr_int(Ref2, 1000001, 0, 0)),
     keydir_itr_release(Ref1),
     ?assertEqual(ok, receive
                          ready ->
@@ -734,7 +790,7 @@ keydir_itr_out_of_date_test2() ->
                      end).
 
 put_till_frozen(R, Name) ->
-    bitcask_nifs:keydir_put(R, crypto:rand_bytes(32), 0, 1234, 0, 1, bitcask_time:tstamp()),
+    bitcask_nifs:keydir_put(R, bitcask:rand_bytes(32), 0, 1234, 0, 1, bitcask_time:tstamp()),
     {ready, Ref2} = bitcask_nifs:keydir_new(Name),
     %%?debugFmt("Putting", []),
     case bitcask_nifs:keydir_itr_int(Ref2, 2000001,

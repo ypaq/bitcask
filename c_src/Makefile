@@ -26,7 +26,9 @@
 module	:= bitcask
 
 env_ok	:= true
-ifeq ($(REBAR_BUILD_DIR),)
+ifeq ($(REBAR_ROOT_DIR),)
+env_ok	:= false
+else ifeq ($(REBAR_BUILD_DIR),)
 env_ok	:= false
 else ifeq ($(ERLANG_ROOT_DIR),)
 env_ok	:= false
@@ -35,8 +37,7 @@ ifneq ($(env_ok),true)
 $(error Must run in Rebar3 environment)
 endif
 
-prj_dir	:= $(abspath $(CURDIR)/..)
-project	:= $(strip $(notdir $(prj_dir)))
+prj_dir	:= $(abspath $(REBAR_ROOT_DIR))
 version	:= $(shell git describe --tags 2>/dev/null | cut -d- -f1)
 
 # match the 'Osname' returned by erlang os:type()
@@ -68,6 +69,9 @@ CPPFLAGS := -DVERSION="$(version)"
 ifeq ($(DEBUG),)
 CPPFLAGS += -DNDEBUG
 endif
+ifneq ($(PULSE),)
+CPPFLAGS += -DPULSE
+endif
 
 so_flag	:= -shared
 
@@ -95,10 +99,6 @@ endif
 CFLAGS    += -std=c99 $(o_level) -fPIC -Wall -Wmissing-prototypes
 LDFLAGS   += $(o_level)
 CPPFLAGS  += -I$(erts_inc)
-
-ifeq ($(enable_pulse), 1)
-CFLAGS    += -DPULSE
-endif
 
 V	?= 0
 ifeq	($(V),0)

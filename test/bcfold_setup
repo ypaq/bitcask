@@ -1,4 +1,4 @@
-#! /usr/bin/env escript 
+#! /usr/bin/env escript
 
 main([BitcaskDir, DataDir]) ->
     load_bitcask(BitcaskDir),
@@ -6,17 +6,16 @@ main([BitcaskDir, DataDir]) ->
     make_medium(DataDir),
     make_large(DataDir),
     make_cs(DataDir).
-       
+
 
 load_bitcask(Dir) ->
     Path = Dir ++ "/ebin/",
-    Modlist = filelib:fold_files(Path, 
-                                 ".*.beam", false, 
-                                 fun(X, Acc) ->
-                                         Mod0 = filename:rootname(filename:basename(X)),
-                                         Mod = list_to_atom(Mod0),
-                                         [Mod | Acc]
-                                 end, []),
+    Modlist = filelib:fold_files(Path, ".*.beam", false,
+        fun(X, Acc) ->
+            Mod0 = filename:rootname(filename:basename(X)),
+            Mod = list_to_atom(Mod0),
+            [Mod | Acc]
+        end, []),
     code:add_path(Path),
     lists:map(fun code:load_abs/1, Modlist).
 
@@ -40,13 +39,13 @@ make_dir(Dir, KeySz, BinSz) ->
     BinarySize = 14 + KeySz + BinSz + 12,
     %%        1GB
     NumObjs = (1073741824 div BinarySize) + 1,
-    Key = crypto:rand_bytes(KeySz),
-    Bin = crypto:rand_bytes(BinSz),
-    [bitcask:put(Ref, <<Key/binary,X:32>>, Bin) ||
-        X <- lists:seq(1, NumObjs)],
+    RandFnc = case erlang:function_exported(crypto, rand_bytes, 1) of
+        true ->
+            rand_bytes;
+        _ ->
+            strong_rand_bytes
+    end,
+    Key = crypto:RandFnc(KeySz),
+    Bin = crypto:RandFnc(BinSz),
+    [bitcask:put(Ref, <<Key/binary,X:32>>, Bin) || X <- lists:seq(1, NumObjs)],
     bitcask:close(Ref).
-
-
-
-    
-    

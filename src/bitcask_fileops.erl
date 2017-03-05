@@ -1,8 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% bitcask: Eric Brewer-inspired key/value store
-%%
-%% Copyright (c) 2007-2010 Basho Technologies, Inc.  All Rights Reserved.
+%% Copyright (c) 2010-2017 Basho Technologies, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -44,24 +42,39 @@
          un_write/1]).
 -export([read_file_info/1, write_file_info/2, is_file/1]).
 
--include_lib("kernel/include/file.hrl").
+%% Make sure only a consistent set of test macros are defined so we don't
+%% have to keep checking them all repeatedly.
+-ifndef(TEST).
+-undef(EQC).
+-undef(PULSE).
+-else.
+-ifndef(EQC).
+-undef(PULSE).
+-endif.
+-endif.
 
--include("bitcask.hrl").
-
--define(HINT_RECORD_SZ, 18). % Tstamp(4) + KeySz(2) + TotalSz(4) + Offset(8)
+-ifdef(TEST).
+-export([
+    has_valid_hintfile/1
+]).
+-endif.
 
 -ifdef(PULSE).
 -compile({parse_transform, pulse_instrument}).
 -endif.
 
--ifdef(TEST).
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
--include_lib("eqc/include/eqc_fsm.hrl").
 -endif.
--compile(export_all).
+
+-ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
+-include_lib("kernel/include/file.hrl").
+-include("bitcask.hrl").
+
+-define(HINT_RECORD_SZ, 18). % Tstamp(4) + KeySz(2) + TotalSz(4) + Offset(8)
 
 %% @doc Open a new file for writing.
 %% Called on a Dirname, will open a fresh file in that directory.

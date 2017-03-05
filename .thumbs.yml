@@ -18,8 +18,11 @@ build_steps:
   - rebar3 as check brt-deps --check
   - rebar3 as check xref
   - rebar3 as check dialyzer
+  # tests leave lots of cruft behind, so clean up after them
   - BITCASK_IO_MODE=erlang rebar3 eunit
+  - /bin/rm -rf /tmp/bc.* /tmp/bitcask.*
   - BITCASK_IO_MODE=nif rebar3 eunit
+  - /bin/rm -rf /tmp/bc.* /tmp/bitcask.*
   # last, but not least, do the docs build?
   - rebar3 edoc
 org_mode: true

@@ -1,7 +1,5 @@
 # rebar
-*.crashdump
 /.cache/
-/.eqc*
 /.eunit/
 /.rebar/
 /.rebar3/
@@ -9,7 +7,6 @@
 /_checkouts
 /deps
 /rebar.lock
-/compile_commands.json
 
 # work environments
 *.bak
@@ -19,7 +16,6 @@
 *.sublime-project
 *.sublime-workspace
 *.tmp
-*.txt
 *_plt
 *~
 .DS_Store
@@ -27,14 +23,24 @@
 .project
 .settings/
 .tm_properties
+/*.txt
 erln8.config
 tmp/
 
 # Erlang build/test artifacts
 *.app
 *.beam
-/doc/
+*.coverdata
+*.crashdump
+*.eqc
+/.eqc*
+/doc/*.css
+/doc/*.html
+/doc/*.png
+/doc/edoc-info
 /ebin/
-log/
-*.so
-*.o
+/log/
+
+# NIF build/test artifacts
+/_work/
+/priv/bitcask*.so
