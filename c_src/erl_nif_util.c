@@ -1,8 +1,6 @@
 // -------------------------------------------------------------------
 //
-// bitcask: Eric Brewer-inspired key/value store
-//
-// Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+// Copyright (c) 2010-2017 Basho Technologies, Inc.
 //
 // This file is provided to you under the Apache License,
 // Version 2.0 (the "License"); you may not use this file
@@ -20,30 +18,30 @@
 //
 // -------------------------------------------------------------------
 
-#include "erl_nif_util.h"
-#include "erl_nif_compat.h"
-
+#include <stdint.h>
 #include <string.h>
 
-int enif_get_uint64_bin(ErlNifEnv* env, ERL_NIF_TERM term, uint64_t* outvalue)
+#include <erl_nif.h>
+
+#include "erl_nif_util.h"
+
+int enif_get_uint64_bin(ErlNifEnv* env, ERL_NIF_TERM term, uint64_t * outvalue)
 {
     ErlNifBinary bin;
-    if (enif_inspect_binary(env, term, &bin) && bin.size == sizeof(uint64_t))
+    if (enif_inspect_binary(env, term, & bin) && bin.size == sizeof(* outvalue))
     {
-        memcpy(outvalue, ((uint64_t*)bin.data), sizeof(uint64_t));
-        return 1;
+        memcpy(outvalue, bin.data, sizeof(* outvalue));
+        return  1;
     }
-    else
-    {
-        return 0;
-    }
+    return  0;
 }
 
-ERL_NIF_TERM enif_make_uint64_bin(ErlNifEnv* env, uint64_t value)
+// WARNING: No provision for reporting an allocation error!
+ERL_NIF_TERM enif_make_uint64_bin(ErlNifEnv * env, uint64_t value)
 {
     ErlNifBinary bin;
-    enif_alloc_binary_compat(env, sizeof(uint64_t), &bin);
-    memcpy(bin.data, &value, sizeof(uint64_t));
-    return enif_make_binary(env, &bin);
+    enif_alloc_binary(sizeof(value), & bin);
+    memcpy(bin.data, & value, sizeof(value));
+    return  enif_make_binary(env, & bin);
 }
 

@@ -60,12 +60,13 @@ so_dest	:= $(dist_dir)/$(so_name).so
 nif_srcs := $(wildcard $(prj_dir)/c_src/*.c)
 nif_objs := $(foreach n, $(sort $(basename $(notdir \
 		$(nif_srcs)))), $(work_dir)/$(n).o)
+nif_deps := $(patsubst %.o,%.d,$(nif_objs))
 
 o_level	:= -g2 -O3
 
 LDFLAGS := -m64
 CFLAGS	:= $(LDFLAGS)
-CPPFLAGS := -DVERSION="$(version)"
+CPPFLAGS := -isystem $(erts_inc) -DVERSION="$(version)"
 ifeq ($(DEBUG),)
 CPPFLAGS += -DNDEBUG
 endif
@@ -98,12 +99,18 @@ $(error Unsupported platform '$(sys_type)')
 endif
 CFLAGS    += -std=c99 $(o_level) -fPIC -Wall -Wmissing-prototypes
 LDFLAGS   += $(o_level)
-CPPFLAGS  += -I$(erts_inc)
+
+ifneq ($(BITCASK_DEBUG),)
+CPPFLAGS += -DBITCASK_DEBUG
+endif
+# bitcask uses macros to define groups of functions, some of which aren't used
+CFLAGS	+= -Wno-unused-function
 
 V	?= 0
 ifeq	($(V),0)
 c_verbose   = @echo ' C      ' $(<F);
 cp_verbose  = @echo ' CP     ' $(@F);
+d_verbose   = @echo ' DEPS   ' $(<F);
 ld_verbose  = @echo ' LD     ' $(@F);
 endif
 
@@ -126,14 +133,31 @@ clean-dist :: clean
 
 veryclean :: clean-dist
 
-$(dist_dir)/$(so_name).so : $(work_dir)/$(so_name).so
+# install
+
+$(dist_dir)/% : $(work_dir)/%
 	@test -d $(@D) || /bin/mkdir -p $(@D)
 	$(cp_verbose) $(ecp) $< $@
+
+# link
 
 $(work_dir)/$(so_name).so : $(nif_objs)
 	@test -d $(@D) || /bin/mkdir -p $(@D)
 	$(ld_verbose) $(strip $(CC) $(so_flag) $(LDFLAGS) -o $@ $^)
 
+# compile
+
 $(work_dir)/%.o : $(prj_dir)/c_src/%.c
 	@test -d $(@D) || /bin/mkdir -p $(@D)
 	$(c_verbose) $(strip $(CC) -c $(CFLAGS) $(CPPFLAGS) -o $@ $<)
+
+# dependencies
+
+$(work_dir)/%.d : $(prj_dir)/c_src/%.c
+	@test -d $(@D) || /bin/mkdir -p $(@D)
+	$(d_verbose) $(strip $(CC) -MM -E $(CFLAGS) $(CPPFLAGS) \
+		-MT $@ -MT $(patsubst %.d,%.o,$@) -MF $@ $<)
+
+ifeq ($(NO_DEPS),)
+-include $(nif_deps)
+endif

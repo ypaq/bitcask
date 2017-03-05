@@ -1,8 +1,6 @@
 // -------------------------------------------------------------------
 //
-// bitcask: Eric Brewer-inspired key/value store
-//
-// Copyright (c) 2010 Basho Technologies, Inc. All Rights Reserved.
+// Copyright (c) 2010-2017 Basho Technologies, Inc.
 //
 // This file is provided to you under the Apache License,
 // Version 2.0 (the "License"); you may not use this file
@@ -19,14 +17,17 @@
 // under the License.
 //
 // -------------------------------------------------------------------
+
 #ifndef ERL_NIF_UTIL_H
 #define ERL_NIF_UTIL_H
 
-#include "erl_nif.h"
 #include <stdint.h>
 
-int enif_get_uint64_bin(ErlNifEnv* env, ERL_NIF_TERM term, uint64_t* outvalue);
+#include <erl_nif.h>
 
-ERL_NIF_TERM enif_make_uint64_bin(ErlNifEnv* env, uint64_t value);
+int enif_get_uint64_bin(ErlNifEnv * env, ERL_NIF_TERM term, uint64_t * outvalue);
 
-#endif
+// TODO: API needs to be able to report error.
+ERL_NIF_TERM enif_make_uint64_bin(ErlNifEnv * env, uint64_t value);
+
+#endif  // ERL_NIF_UTIL_H
