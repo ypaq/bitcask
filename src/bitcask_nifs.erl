@@ -519,14 +519,7 @@ init_nif_lib() ->
     end,
     SoBase = filename:join(SoDir, ?APPLICATION),
     AppEnv = application:get_all_env(?APPLICATION),
-    {OtpRel, _} = string:to_integer(case erlang:system_info(otp_release) of
-        [$R | Rel] ->
-            Rel;
-        Rel ->
-            Rel
-    end),
-    case OtpRel >= ?MIN_OTP_ALT_SCHED andalso
-            erlang:system_info(dirty_cpu_schedulers) > 0 of
+    case dirty_schedulers_available() of
         true ->
             SoAlt = SoBase ++ ?ALT_SCHED_SUFFIX,
             case erlang:load_nif(SoAlt, AppEnv) of
@@ -537,10 +530,33 @@ init_nif_lib() ->
                 _ ->
                     erlang:load_nif(SoBase, AppEnv)
             end;
-        _ ->
+        false ->
             erlang:load_nif(SoBase, AppEnv)
     end.
 
+
+-spec dirty_schedulers_available() -> boolean().
+dirty_schedulers_available() ->
+    {OtpRel, _} = string:to_integer(case erlang:system_info(otp_release) of
+        [$R | Rel] ->
+            Rel;
+        Rel ->
+            Rel
+    end),
+
+    case OtpRel >= ?MIN_OTP_ALT_SCHED of
+        false ->
+            false;
+        true ->
+            try erlang:system_info(dirty_cpu_schedulers) of
+                N when N > 0 ->
+                    true;
+                0 ->
+                    false
+            catch error:badarg ->
+                    false
+            end
+    end.
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
