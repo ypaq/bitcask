@@ -50,6 +50,6 @@ loop(Name) ->
   end.
 
 mk_name() ->
-  {A, B, C} = erlang:now(),
+  {A, B, C} = erlang:timestamp(),
   lists:concat([A, "-", B, "-", C]).
 

@@ -5,6 +5,7 @@
 -module(event_logger).
 
 -compile(export_all).
+-compile(nowarn_export_all).
 
 -behaviour(gen_server).
 
@@ -128,6 +129,6 @@ add_event(#event{timestamp = Now, data = Data}, State) ->
   State#state{ events = [Event|State#state.events] }.
 
 timestamp() ->
-  {A, B, C} = erlang:now(),
+  {A, B, C} = erlang:timestamp(),
   1000000 * (1000000 * A + B) + C.
 

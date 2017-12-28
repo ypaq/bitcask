@@ -20,7 +20,19 @@
 %%
 %% -------------------------------------------------------------------
 -module(bitcask_io).
--compile(export_all).
+
+-export([file_open/2,
+         file_close/1,
+         file_sync/1,
+         file_pread/3,
+         file_pwrite/3,
+         file_read/2,
+         file_write/2,
+         file_seekbof/1,
+         file_position/2,
+         file_truncate/1,
+         file_module/0
+         ]).
 
 -ifdef(PULSE).
 -compile({parse_transform, pulse_instrument}).
@@ -28,6 +40,8 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-compile(export_all).
+-compile(nowarn_export_all).
 -endif.
 
 file_open(Filename, Opts) ->

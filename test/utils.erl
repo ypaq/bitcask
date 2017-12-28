@@ -6,6 +6,7 @@
 -module(utils).
 
 -compile(export_all).
+-compile(nowarn_export_all).
 
 whereis(Name) ->
   erlang:whereis(Name).

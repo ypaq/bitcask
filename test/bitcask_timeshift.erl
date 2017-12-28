@@ -25,6 +25,7 @@
 -include("bitcask.hrl").
 
 -compile(export_all).
+-compile(nowarn_export_all).
 
 current_tstamp() ->
     case erlang:get(meck_tstamp) of

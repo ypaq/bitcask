@@ -20,7 +20,27 @@
 %%
 %% -------------------------------------------------------------------
 -module(bitcask_file).
--compile(export_all).
+
+-export([file_open/2,
+         file_close/1,
+         file_sync/1,
+         file_pread/3,
+         file_pwrite/3,
+         file_read/2,
+         file_write/2,
+         file_position/2,
+         file_seekbof/1,
+         file_truncate/1
+         ]).
+
+-export([init/1]).
+
+-export([handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
+
 -behaviour(gen_server).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -30,10 +50,6 @@
 -endif.
 
 %% API
-
-%% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
 
 -record(state, {fd    :: file:fd(),
                 owner :: pid()}).

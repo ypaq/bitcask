@@ -4,6 +4,7 @@
 
 -ifdef(TEST).
 -compile(export_all).
+-compile(nowarn_export_all).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
@@ -34,7 +35,7 @@ pr156_regression2_test_() ->
      end}.
 
 pr156_regression1(X) ->
-    io:format("pr156_regression1 ~p at ~p\n", [X, now()]),
+    io:format("pr156_regression1 ~p at ~p\n", [X, erlang:timestamp()]),
     token:next_name(),
     Dir = ?BITCASK ++ ".1." ++ token:get_name(),
     os:cmd("rm -rf " ++ Dir),
@@ -74,7 +75,7 @@ pr156_regression1(X) ->
 %% r1s11.bos1 executes each of N iterations in about 1500 msec.
 
 pr156_regression2(X) ->
-    io:format("pr156_regression2 ~p at ~p\n", [X, now()]),
+    io:format("pr156_regression2 ~p at ~p\n", [X, erlang:timestamp()]),
     token:next_name(),
     Dir = ?BITCASK ++ ".2." ++ token:get_name(),
     os:cmd("rm -rf " ++ Dir),
@@ -136,12 +137,12 @@ check_no_tombstones(Ref, Good) ->
     end.
 
 make_merge_txt(Dir, Seed, Probability) ->
-    random:seed(Seed),
+    rand:seed(exs64, Seed),
     case filelib:is_dir(Dir) of
         true ->
             DataFiles = filelib:wildcard("*.data", Dir),
             {ok, FH} = file:open(Dir ++ "/merge.txt", [write]),
-            [case random:uniform(100) < Probability of
+            [case rand:uniform(100) < Probability of
                  true ->
                      io:format(FH, "~s\n", [DF]);
                  false ->

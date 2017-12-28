@@ -5,6 +5,7 @@
 -module(mute).
 
 -compile(export_all).
+-compile(nowarn_export_all).
 
 % Call Fun with output suppressed.
 run(Fun) ->
