@@ -468,7 +468,7 @@ open_fold_files(Dirname, Keydir, Count) ->
                 open_fold_files(Dirname, Keydir, Count-1)
         end
     catch X:Y:Stacktrace ->
-            {error, {X,Y, Stacktrace)}}
+            {error, {X,Y, Stacktrace}}
     end.
 
 maybe_log_missing_file(Dirname, Keydir, ErrFile, enoent) ->
