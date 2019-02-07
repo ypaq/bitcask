@@ -1,6 +1,6 @@
 %%% File        : handle_errors.erl
 %%% Author      : Ulf Norell
-%%% Description : 
+%%% Description :
 %%% Created     : 26 Mar 2012 by Ulf Norell
 -module(event_logger).
 
@@ -128,6 +128,6 @@ add_event(#event{timestamp = Now, data = Data}, State) ->
   State#state{ events = [Event|State#state.events] }.
 
 timestamp() ->
-  {A, B, C} = erlang:now(),
+  {A, B, C} = erlang:timestamp(),
   1000000 * (1000000 * A + B) + C.
 

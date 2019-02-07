@@ -1,6 +1,6 @@
 %%% File        : token.erl
 %%% Author      : Ulf Norell
-%%% Description : 
+%%% Description :
 %%% Created     : 20 Mar 2012 by Ulf Norell
 -module(token).
 
@@ -50,6 +50,6 @@ loop(Name) ->
   end.
 
 mk_name() ->
-  {A, B, C} = erlang:now(),
+  {A, B, C} = erlang:timestamp(),
   lists:concat([A, "-", B, "-", C]).
 

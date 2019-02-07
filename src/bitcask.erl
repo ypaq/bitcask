@@ -51,6 +51,7 @@
 -ifdef(PULSE).
 -compile({parse_transform, pulse_instrument}).
 -compile(export_all).
+-compile(nowarn_export_all).
 -define(OPEN_FOLD_RETRIES, 100).
 -else.
 -define(OPEN_FOLD_RETRIES, 3).
@@ -58,6 +59,7 @@
 
 -ifdef(TEST).
 -compile(export_all).
+-compile(nowarn_export_all).
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 -export([leak_t0/0, leak_t1/0]).
@@ -87,11 +89,7 @@
                    tombstone_version = 2 :: 0 | 2
                   }).
 
--ifdef(namespaced_types).
 -type bitcask_set() :: sets:set().
--else.
--type bitcask_set() :: set().
--endif.
 
 -record(mstate, { dirname :: string(),
                   merge_lock :: reference(),
@@ -2236,7 +2234,7 @@ fold_corrupt_file_test2() ->
 % and a pending hash is created. There *has* to be an iterator open when you
 % call this or it will loop for ever and ever. Don't try this at home.
 put_till_frozen(B) ->
-    Key = crypto:rand_bytes(32),
+    Key = crypto:strong_rand_bytes(32),
     bitcask:put(B, Key, <<>>),
     bitcask:delete(B, Key),
 
@@ -3679,12 +3677,12 @@ update_tombstones_test() ->
     ?assertEqual(1, TombCount).
 
 make_merge_file(Dir, Seed, Probability) ->
-    random:seed(Seed),
+    rand:seed(exrop, Seed),
     case filelib:is_dir(Dir) of
         true ->
             DataFiles = filelib:wildcard("*.data", Dir),
             {ok, FH} = file:open(Dir ++ "/merge.txt", [write,raw]),
-            [case random:uniform(100) < Probability of
+            [case rand:uniform(100) < Probability of
                  true ->
                      file:write(FH, io_lib:format("~s\n", [DF]));
                  false ->
